@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 import os
 import sys
+import subprocess
+import shutil
 
 from methods import print_error
 
 
-libname = "EXTENSION-NAME"
+libname = "godot-libartnet"
 projectdir = "demo"
 
 localEnv = Environment(tools=["default"], PLATFORM="")
@@ -35,7 +37,151 @@ Run the following command to download godot-cpp:
     git submodule update --init --recursive""")
     sys.exit(1)
 
+if not (os.path.isdir("libartnet") and os.listdir("libartnet")):
+    print_error("""libartnet is not available within this folder, as Git submodules haven't been initialized.
+Run the following command to download libartnet:
+
+    git submodule update --init --recursive""")
+    sys.exit(1)
+
 env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
+
+# Build libartnet using autotools
+libartnet_dir = "libartnet"
+libartnet_build_dir = os.path.join("libartnet", ".build", env['platform'])
+
+def build_libartnet(target, source, env):
+    """Build libartnet using autotools"""
+    platform = env['platform']
+    
+    # For WASM, provide stub implementation
+    if platform == "web":
+        print("WARNING: libartnet networking not supported on WASM. Using stub implementation.")
+        return 0
+    
+    # Check if libartnet submodule exists
+    if not os.path.isdir(libartnet_dir):
+        print_error("libartnet submodule not found. Run: git submodule update --init --recursive")
+        return 1
+    
+    # Create build directory
+    build_path = os.path.join(libartnet_dir, ".build", platform)
+    if not os.path.exists(build_path):
+        os.makedirs(build_path)
+    
+    # Get configure flags based on platform
+    configure_flags = []
+    
+    # Handle cross-compilation for Android
+    if platform == "android":
+        # Android NDK toolchain setup
+        android_ndk = os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK")
+        if not android_ndk:
+            print_error("ANDROID_NDK_ROOT or ANDROID_NDK environment variable not set")
+            return 1
+        
+        arch = env.get('arch', 'arm64')
+        if arch == 'arm64':
+            host = 'aarch64-linux-android'
+        elif arch == 'arm32':
+            host = 'arm-linux-androideabi'
+        elif arch == 'x86_64':
+            host = 'x86_64-linux-android'
+        elif arch == 'x86_32':
+            host = 'i686-linux-android'
+        else:
+            host = 'aarch64-linux-android'
+        
+        # Set up Android toolchain
+        api_level = os.environ.get("ANDROID_API_LEVEL", "21")
+        toolchain = os.path.join(android_ndk, "toolchains", "llvm", "prebuilt")
+        toolchain_dirs = os.listdir(toolchain) if os.path.exists(toolchain) else []
+        if toolchain_dirs:
+            toolchain = os.path.join(toolchain, toolchain_dirs[0])
+        
+        cc = os.path.join(toolchain, "bin", "{}-clang".format(host))
+        cxx = os.path.join(toolchain, "bin", "{}-clang++".format(host))
+        
+        if os.path.exists(cc):
+            configure_flags.extend([
+                "--host={}".format(host),
+                "CC={}".format(cc),
+                "CXX={}".format(cxx),
+                "CFLAGS=-fPIC -DANDROID",
+                "CXXFLAGS=-fPIC -DANDROID",
+            ])
+    
+    # Run autotools build process
+    original_dir = os.getcwd()
+    source_dir = os.path.abspath(libartnet_dir)
+    
+    try:
+        # First, run autoreconf in the source directory if configure doesn't exist
+        configure_script = os.path.join(source_dir, "configure")
+        if not os.path.exists(configure_script):
+            result = subprocess.run(["autoreconf", "-fi"], cwd=source_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                print_error("autoreconf failed:", result.stderr)
+                return 1
+        
+        # Now run configure in the build directory
+        os.chdir(build_path)
+        
+        # Run configure
+        configure_cmd = [configure_script, "--prefix", os.path.abspath("."), "--disable-shared", "--enable-static"]
+        configure_cmd.extend(configure_flags)
+        
+        result = subprocess.run(configure_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error("configure failed:", result.stderr)
+            return 1
+        
+        # Run make
+        result = subprocess.run(["make", "-j", str(os.cpu_count() or 4)], capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error("make failed:", result.stderr)
+            return 1
+        
+        # Run make install
+        result = subprocess.run(["make", "install"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error("make install failed:", result.stderr)
+            return 1
+        
+    finally:
+        os.chdir(original_dir)
+    
+    # Create marker file to indicate build is complete
+    marker_file = os.path.join(build_path, ".built")
+    with open(marker_file, 'w') as f:
+        f.write("libartnet built successfully\n")
+    
+    return 0
+
+# Build libartnet before building the extension
+if env['platform'] != "web":
+    libartnet_built = env.Command(
+        os.path.join(libartnet_build_dir, ".built"),
+        [],
+        build_libartnet
+    )
+    env.AlwaysBuild(libartnet_built)
+    
+    # Add libartnet include and library paths
+    # Headers are installed in include/artnet/ directory
+    libartnet_include = os.path.join(libartnet_build_dir, "include")
+    libartnet_lib_dir = os.path.join(libartnet_build_dir, "lib")
+    
+    env.Append(CPPPATH=[libartnet_include])
+    env.Append(LIBPATH=[libartnet_lib_dir])
+    env.Append(LIBS=["artnet"])
+else:
+    # For WASM, we'll need to handle this differently or provide stubs
+    # For now, just add the include path so headers can be found
+    libartnet_include = os.path.join(libartnet_dir, "artnet")
+    env.Append(CPPPATH=[libartnet_include])
+    # Define a preprocessor macro to indicate WASM stub mode
+    env.Append(CPPDEFINES=["ARTNET_WASM_STUB"])
 
 env.Append(CPPPATH=["src/"])
 sources = Glob("src/*.cpp")
@@ -53,10 +199,21 @@ suffix = env['suffix'].replace(".dev", "").replace(".universal", "")
 
 lib_filename = "{}{}{}{}".format(env.subst('$SHLIBPREFIX'), libname, suffix, env.subst('$SHLIBSUFFIX'))
 
+# Make libartnet build a dependency before creating the library
+if env['platform'] != "web":
+    # Ensure libartnet is built before we try to compile sources
+    # Make each source file depend on libartnet_built
+    for source in sources:
+        env.Depends(source, libartnet_built)
+
 library = env.SharedLibrary(
     "bin/{}/{}".format(env['platform'], lib_filename),
     source=sources,
 )
+
+# Make libartnet build a dependency of the library
+if env['platform'] != "web":
+    env.Depends(library, libartnet_built)
 
 copy = env.Install("{}/bin/{}/".format(projectdir, env["platform"]), library)
 

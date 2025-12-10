@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="ArtNetController" inherits="RefCounted" version="4.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/4.1/doc/classes.xsd">
+	<brief_description>
+		Controller for sending ArtNet DMX data over IP networks.
+	</brief_description>
+	<description>
+		ArtNetController provides a GDScript interface to the libartnet library, allowing you to send DMX lighting control data over ArtNet protocol. This enables control of DMX fixtures from Godot projects.
+		
+		ArtNet is a protocol that allows transmission of DMX-512 data over IP networks, commonly used in professional lighting control systems.
+		
+		[b]Note:[/b] ArtNet networking is not supported on WebAssembly/WASM platforms. Methods will return errors on WASM builds.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="configure">
+			<return type="bool" />
+			<param index="0" name="bind_address" type="String" />
+			<param index="1" name="port" type="int" />
+			<param index="2" name="net" type="int" />
+			<param index="3" name="subnet" type="int" />
+			<param index="4" name="universe" type="int" />
+			<param index="5" name="broadcast_address" type="String" default="&quot;255.255.255.255&quot;" />
+			<description>
+				Configures the ArtNet node with network settings. This must be called before [method start].
+				
+				- [code]bind_address[/code]: IP address to bind the ArtNet node to (e.g., "192.168.1.100")
+				- [code]port[/code]: UDP port number (typically 6454 for ArtNet)
+				- [code]net[/code]: ArtNet net address (0-127)
+				- [code]subnet[/code]: ArtNet subnet address (0-15)
+				- [code]universe[/code]: DMX universe number (0-15 within the subnet)
+				- [code]broadcast_address[/code]: Broadcast address for sending ArtNet packets (default: "255.255.255.255")
+				
+				Returns [code]true[/code] on success, [code]false[/code] on error.
+			</description>
+		</method>
+		<method name="start">
+			<return type="bool" />
+			<description>
+				Starts the ArtNet node and begins network operations. Must be called after [method configure] and before [method send_dmx].
+				
+				Returns [code]true[/code] on success, [code]false[/code] on error.
+			</description>
+		</method>
+		<method name="stop">
+			<return type="void" />
+			<description>
+				Stops the ArtNet node and stops all network operations. Call this when you're done using the controller.
+			</description>
+		</method>
+		<method name="is_running">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the ArtNet node is currently running, [code]false[/code] otherwise.
+			</description>
+		</method>
+		<method name="set_dmx_data">
+			<return type="bool" />
+			<param index="0" name="universe" type="int" />
+			<param index="1" name="data" type="PackedByteArray" />
+			<description>
+				Sets the DMX channel data to be sent. The data array can contain up to 512 bytes (one byte per DMX channel).
+				
+				- [code]universe[/code]: The DMX universe to send data to
+				- [code]data[/code]: PackedByteArray containing DMX channel values (0-255 per channel)
+				
+				Returns [code]true[/code] on success, [code]false[/code] if data exceeds 512 channels.
+			</description>
+		</method>
+		<method name="send_dmx">
+			<return type="bool" />
+			<description>
+				Sends the DMX data that was set with [method set_dmx_data] over the ArtNet network.
+				
+				Must be called after [method start] and [method set_dmx_data].
+				
+				Returns [code]true[/code] on success, [code]false[/code] on error.
+			</description>
+		</method>
+	</methods>
+	<example>
+			<code>
+# Configure and start ArtNet controller
+var artnet = ArtNetController.new()
+if artnet.configure("192.168.1.100", 6454, 0, 0, 0):
+    if artnet.start():
+        print("ArtNet controller started")
+        
+        # Set DMX data (512 channels)
+        var dmx_data = PackedByteArray()
+        dmx_data.resize(512)
+        dmx_data[0] = 255  # Channel 1 at full brightness
+        dmx_data[1] = 128  # Channel 2 at half brightness
+        
+        if artnet.set_dmx_data(0, dmx_data):
+            if artnet.send_dmx():
+                print("DMX data sent")
+        
+        # Clean up
+        artnet.stop()
+			</code>
+	</example>
+</class>
+
