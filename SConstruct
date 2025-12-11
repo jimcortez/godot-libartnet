@@ -314,6 +314,7 @@ def _build_libartnet_windows(env, build_path, arch):
             "/p:Configuration=" + config,
             "/p:Platform=" + msbuild_platform,
             "/p:OutDir=" + out_dir,
+            "/p:WindowsTargetPlatformVersion=10.0",  # Override SDK version to use available SDK
             "/v:minimal",  # Minimal verbosity
             "/nologo",  # Suppress MSBuild banner
         ]
