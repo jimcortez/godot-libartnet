@@ -297,20 +297,48 @@ def _build_libartnet_windows(env, build_path, arch):
             return False
         
         # Build the solution
-        os.chdir(msvc_dir)
+        # Determine output directory
+        lib_dir = os.path.join(build_path, "lib")
+        if not os.path.exists(lib_dir):
+            os.makedirs(lib_dir)
+        
+        out_dir = os.path.abspath(lib_dir)
+        # MSBuild expects trailing backslash for OutDir
+        if not out_dir.endswith("\\"):
+            out_dir = out_dir + "\\"
+        
         msbuild_cmd = [
             msbuild,
             solution_file,
             "/t:libartnet",
             "/p:Configuration=" + config,
             "/p:Platform=" + msbuild_platform,
-            "/p:OutDir=" + os.path.abspath(os.path.join(build_path, "lib")) + "\\",
+            "/p:OutDir=" + out_dir,
+            "/v:minimal",  # Minimal verbosity
+            "/nologo",  # Suppress MSBuild banner
         ]
         
-        result = subprocess.run(msbuild_cmd, capture_output=True, text=True)
+        print("Running MSBuild command:", " ".join(msbuild_cmd))
+        print("Working directory:", msvc_dir)
+        print("Output directory:", out_dir)
+        
+        result = subprocess.run(msbuild_cmd, capture_output=True, text=True, cwd=msvc_dir, shell=False)
+        
         if result.returncode != 0:
-            print_error("MSBuild failed:", result.stderr)
+            print_error("MSBuild failed with return code:", result.returncode)
+            if result.stdout:
+                print_error("MSBuild stdout:")
+                print(result.stdout)
+            if result.stderr:
+                print_error("MSBuild stderr:")
+                print(result.stderr)
+            # Also print the full command for debugging
+            print_error("Command was:", " ".join(msbuild_cmd))
             return False
+        
+        # Print success message with any output
+        if result.stdout:
+            print("MSBuild output:", result.stdout)
         
         # MSBuild outputs to a specific directory structure
         # Find the built library (libartnet.lib)
