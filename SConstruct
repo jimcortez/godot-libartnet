@@ -185,6 +185,22 @@ def _build_libartnet_arch(env, build_path, arch):
         # Run configure
         # Add -fPIC flag for static libraries that will be linked into shared libraries
         configure_env = os.environ.copy()
+        
+        # For Android, use the environment from godot-cpp
+        if platform == "android":
+            # Get the environment that godot-cpp set up
+            if 'ENV' in env:
+                configure_env.update(env['ENV'])
+            # Set CC and CXX as environment variables (in addition to configure flags)
+            if cc:
+                configure_env['CC'] = cc
+            if cxx:
+                configure_env['CXX'] = cxx
+            # Ensure PATH includes Android NDK toolchain
+            if 'ENV' in env and 'PATH' in env['ENV']:
+                existing_path = configure_env.get('PATH', '')
+                configure_env['PATH'] = env['ENV']['PATH'] + os.pathsep + existing_path
+        
         pic_flags = "-fPIC"
         if "CFLAGS" in configure_env:
             configure_env["CFLAGS"] = configure_env["CFLAGS"] + " " + pic_flags
@@ -198,9 +214,14 @@ def _build_libartnet_arch(env, build_path, arch):
         configure_cmd = [configure_script, "--prefix", os.path.abspath("."), "--disable-shared", "--enable-static"]
         configure_cmd.extend(configure_flags)
         
+        print("Running configure with CC={}, CXX={}".format(configure_env.get('CC', 'not set'), configure_env.get('CXX', 'not set')))
         result = subprocess.run(configure_cmd, capture_output=True, text=True, env=configure_env)
         if result.returncode != 0:
-            print_error("configure failed:", result.stderr)
+            print_error("configure failed:")
+            if result.stdout:
+                print_error("configure stdout:", result.stdout)
+            if result.stderr:
+                print_error("configure stderr:", result.stderr)
             return False
         
         # Run make with CFLAGS to disable problematic warnings that cause build failures
