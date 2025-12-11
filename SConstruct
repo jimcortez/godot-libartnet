@@ -175,14 +175,21 @@ def _build_libartnet_arch(env, build_path, arch):
             configure_flags.extend(["CFLAGS=-arch arm64 -fPIC", "CXXFLAGS=-arch arm64 -fPIC"])
         elif arch == "x86_64":
             # For x86_64 on arm64 hosts, we need to ensure proper cross-compilation
-            configure_flags.extend(["CFLAGS=-arch x86_64 -fPIC", "CXXFLAGS=-arch x86_64 -fPIC"])
-            # Check if we're on an arm64 host trying to build x86_64
+            # Use clang with explicit architecture targeting
             import platform as plat_module
             host_arch = plat_module.machine().lower()
             if host_arch == "arm64":
-                # On arm64 host, we might need to use Rosetta or ensure proper toolchain
-                # The -arch flag should be sufficient, but we verify the build output
-                pass
+                # On arm64 host building for x86_64, ensure we use the right compiler flags
+                # Check if we have x86_64 support (might not be available on all systems)
+                configure_flags.extend([
+                    "CFLAGS=-arch x86_64 -fPIC -target x86_64-apple-macosx",
+                    "CXXFLAGS=-arch x86_64 -fPIC -target x86_64-apple-macosx",
+                    "CC=clang",
+                    "CXX=clang++"
+                ])
+            else:
+                # On x86_64 host, just use -arch flag
+                configure_flags.extend(["CFLAGS=-arch x86_64 -fPIC", "CXXFLAGS=-arch x86_64 -fPIC"])
     
     
     # Handle cross-compilation for Android
