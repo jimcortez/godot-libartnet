@@ -124,17 +124,21 @@ def _build_libartnet_arch(env, build_path, arch):
     
     # Handle cross-compilation for Android
     if platform == "android":
-        # Android NDK toolchain setup
-        android_ndk = os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK")
-        if not android_ndk:
-            print_error("ANDROID_NDK_ROOT or ANDROID_NDK environment variable not set")
-            return 1
+        # Use the compiler tools that godot-cpp has already configured in the environment
+        # These are set up correctly for Android cross-compilation
+        cc = env.get('CC', os.environ.get('CC'))
+        cxx = env.get('CXX', os.environ.get('CXX'))
         
+        if not cc or not cxx:
+            print_error("CC and CXX not set in environment. Android NDK toolchain may not be configured.")
+            return False
+        
+        # Map architecture to Android host triple
         arch = env.get('arch', 'arm64')
         if arch == 'arm64':
             host = 'aarch64-linux-android'
         elif arch == 'arm32':
-            host = 'arm-linux-androideabi'
+            host = 'armv7a-linux-androideabi'
         elif arch == 'x86_64':
             host = 'x86_64-linux-android'
         elif arch == 'x86_32':
@@ -142,24 +146,25 @@ def _build_libartnet_arch(env, build_path, arch):
         else:
             host = 'aarch64-linux-android'
         
-        # Set up Android toolchain
-        api_level = os.environ.get("ANDROID_API_LEVEL", "21")
-        toolchain = os.path.join(android_ndk, "toolchains", "llvm", "prebuilt")
-        toolchain_dirs = os.listdir(toolchain) if os.path.exists(toolchain) else []
-        if toolchain_dirs:
-            toolchain = os.path.join(toolchain, toolchain_dirs[0])
+        # Get API level from environment (set by godot-cpp)
+        api_level = env.get('android_api_level', os.environ.get('ANDROID_API_LEVEL', '21'))
         
-        cc = os.path.join(toolchain, "bin", "{}-clang".format(host))
-        cxx = os.path.join(toolchain, "bin", "{}-clang++".format(host))
+        # Get CCFLAGS from environment to preserve target and architecture flags
+        ccflags = env.get('CCFLAGS', [])
+        cflags_str = ' '.join(ccflags) if isinstance(ccflags, list) else str(ccflags)
+        cxxflags_str = cflags_str  # Use same flags for CXX
         
-        if os.path.exists(cc):
-            configure_flags.extend([
-                "--host={}".format(host),
-                "CC={}".format(cc),
-                "CXX={}".format(cxx),
-                "CFLAGS=-fPIC -DANDROID",
-                "CXXFLAGS=-fPIC -DANDROID",
-            ])
+        # Add Android-specific defines and ensure -fPIC
+        cflags_str = "-fPIC -DANDROID " + cflags_str
+        cxxflags_str = "-fPIC -DANDROID " + cxxflags_str
+        
+        configure_flags.extend([
+            "--host={}".format(host),
+            "CC={}".format(cc),
+            "CXX={}".format(cxx),
+            "CFLAGS={}".format(cflags_str),
+            "CXXFLAGS={}".format(cxxflags_str),
+        ])
     
     # Run autotools build process
     original_dir = os.getcwd()
