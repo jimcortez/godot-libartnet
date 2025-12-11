@@ -199,8 +199,18 @@ def _build_libartnet_arch(env, build_path, arch):
             print_error("configure failed:", result.stderr)
             return False
         
-        # Run make
-        result = subprocess.run(["make", "-j", str(os.cpu_count() or 4)], capture_output=True, text=True)
+        # Run make with CFLAGS to disable problematic warnings that cause build failures
+        # libartnet has some code that triggers warnings in newer GCC versions
+        # We need to override CFLAGS to disable -Werror and specific warnings
+        make_env = os.environ.copy()
+        # Disable -Werror and specific warnings that cause issues with libartnet code
+        # Append to existing CFLAGS if set by configure, otherwise set new ones
+        cflags_extra = "-Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
+        # Read Makefile to see what CFLAGS configure set, then override
+        # The safest approach is to pass CFLAGS directly to make
+        make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
+        
+        result = subprocess.run(make_cmd, capture_output=True, text=True, env=make_env)
         if result.returncode != 0:
             print_error("make failed:", result.stderr)
             return False
