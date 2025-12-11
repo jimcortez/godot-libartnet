@@ -182,6 +182,12 @@ def _build_libartnet_arch(env, build_path, arch):
         # Now run configure in the build directory
         os.chdir(build_path)
         
+        # For Android, remove any cached config to ensure fresh detection
+        if platform == "android":
+            config_cache = os.path.join(build_path, "config.cache")
+            if os.path.exists(config_cache):
+                os.remove(config_cache)
+        
         # Run configure
         # Add -fPIC flag for static libraries that will be linked into shared libraries
         configure_env = os.environ.copy()
