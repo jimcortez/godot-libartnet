@@ -206,10 +206,22 @@ def _build_libartnet_arch(env, build_path, arch):
         os.chdir(build_path)
         
         # Run configure
+        # Add -fPIC flag for static libraries that will be linked into shared libraries
+        configure_env = os.environ.copy()
+        pic_flags = "-fPIC"
+        if "CFLAGS" in configure_env:
+            configure_env["CFLAGS"] = configure_env["CFLAGS"] + " " + pic_flags
+        else:
+            configure_env["CFLAGS"] = pic_flags
+        if "CXXFLAGS" in configure_env:
+            configure_env["CXXFLAGS"] = configure_env["CXXFLAGS"] + " " + pic_flags
+        else:
+            configure_env["CXXFLAGS"] = pic_flags
+        
         configure_cmd = [configure_script, "--prefix", os.path.abspath("."), "--disable-shared", "--enable-static"]
         configure_cmd.extend(configure_flags)
         
-        result = subprocess.run(configure_cmd, capture_output=True, text=True)
+        result = subprocess.run(configure_cmd, capture_output=True, text=True, env=configure_env)
         if result.returncode != 0:
             print_error("configure failed:", result.stderr)
             return False
@@ -217,10 +229,11 @@ def _build_libartnet_arch(env, build_path, arch):
         # Run make with CFLAGS to disable problematic warnings that cause build failures
         # libartnet has some code that triggers warnings in newer GCC versions
         # We need to override CFLAGS to disable -Werror and specific warnings
+        # Also ensure -fPIC is included for shared library linking
         make_env = os.environ.copy()
         # Disable -Werror and specific warnings that cause issues with libartnet code
         # Append to existing CFLAGS if set by configure, otherwise set new ones
-        cflags_extra = "-Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
+        cflags_extra = "-fPIC -Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
         # Read Makefile to see what CFLAGS configure set, then override
         # The safest approach is to pass CFLAGS directly to make
         make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
