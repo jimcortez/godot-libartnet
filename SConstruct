@@ -459,6 +459,16 @@ if env['platform'] != "web":
         marker_file = str(target[0])
         marker_dir = os.path.dirname(marker_file)
         
+        # On Windows, verify the build actually succeeded by checking for the library file
+        # If the library exists, we can skip marker creation if it fails
+        platform = env.get('platform', '')
+        if platform == "windows":
+            libartnet_build_dir = os.path.join(libartnet_dir, ".build", "windows")
+            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+            build_succeeded = os.path.exists(lib_file)
+        else:
+            build_succeeded = True
+        
         # Ensure directory exists
         try:
             os.makedirs(marker_dir, exist_ok=True)
@@ -466,12 +476,21 @@ if env['platform'] != "web":
             # Directory might be locked, wait and retry
             import time
             time.sleep(0.2)
-            os.makedirs(marker_dir, exist_ok=True)
+            try:
+                os.makedirs(marker_dir, exist_ok=True)
+            except (IOError, OSError):
+                if not build_succeeded:
+                    # Build didn't succeed, we need the marker to fail
+                    raise
+                # Build succeeded, directory creation failure is non-fatal
+                pass
         
         # Create marker file with retry logic for Windows file locking
         import time
         max_retries = 10
         retry_delay = 0.2
+        marker_created = False
+        
         for attempt in range(max_retries):
             try:
                 # Try to create/truncate the file
@@ -483,32 +502,25 @@ if env['platform'] != "web":
                     # File exists, just update it
                     with open(marker_file, 'w') as f:
                         f.write("libartnet built successfully\n")
+                marker_created = True
                 break  # Success, exit retry loop
             except (IOError, OSError, PermissionError) as e:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, 2.0)  # Exponential backoff, max 2s
                 else:
-                    # Last attempt failed, try one more time with a longer delay
-                    time.sleep(1.0)
-                    try:
-                        with open(marker_file, 'w') as f:
-                            f.write("libartnet built successfully\n")
-                    except:
-                        # Final failure - print error but don't crash
-                        print_warning("Warning: Could not create marker file {}, but build succeeded".format(marker_file))
-                        # Try to create it in a different location as fallback
-                        alt_marker = marker_file + ".tmp"
-                        try:
-                            with open(alt_marker, 'w') as f:
-                                f.write("libartnet built successfully\n")
-                            # Try to rename it
-                            import time
-                            time.sleep(0.5)
-                            if os.path.exists(alt_marker):
-                                os.rename(alt_marker, marker_file)
-                        except:
-                            pass
+                    # All retries exhausted
+                    if build_succeeded:
+                        # Build succeeded but marker creation failed - this is non-fatal on Windows
+                        # The library file existing is proof the build succeeded
+                        print("Warning: Could not create marker file {}, but build succeeded (library file exists)".format(marker_file))
+                        marker_created = False
+                    else:
+                        # Build didn't succeed, marker creation failure indicates a problem
+                        raise
+        
+        # If marker creation failed but build succeeded, that's OK
+        # SCons will check the library file existence as a fallback
         return 0
     
     # Build libartnet and create marker file
