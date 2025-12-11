@@ -528,11 +528,50 @@ if env['platform'] != "web":
     godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
     godot_cpp_lib_file = env.File(godot_cpp_lib_path)
     
-    libartnet_built = env.Command(
-        os.path.join(libartnet_build_dir, ".built"),
-        [godot_cpp_lib_file],  # Depend on godot-cpp being built first
-        [build_libartnet, create_marker]
-    )
+    # For Windows, create a custom action that checks library file if marker creation fails
+    marker_target = os.path.join(libartnet_build_dir, ".built")
+    if env['platform'] == "windows":
+        def create_marker_or_verify(target, source, env):
+            """Create marker file, or verify library exists if marker creation fails"""
+            marker_file = str(target[0])
+            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+            
+            # Try to create marker file
+            try:
+                result = create_marker(target, source, env)
+            except:
+                result = 1
+            
+            # If marker creation failed, check if library exists
+            if result != 0 or not os.path.exists(marker_file):
+                if os.path.exists(lib_file):
+                    # Library exists, build succeeded - create a dummy marker
+                    # Use a different approach: touch the file using os.utime
+                    try:
+                        # Create empty file by opening and closing
+                        open(marker_file, 'a').close()
+                        os.utime(marker_file, None)  # Update timestamp
+                    except:
+                        # Even that failed - but library exists, so build succeeded
+                        # Return 0 to indicate success
+                        pass
+                    return 0
+                else:
+                    # Library doesn't exist, build failed
+                    return 1
+            return 0
+        
+        libartnet_built = env.Command(
+            marker_target,
+            [godot_cpp_lib_file],  # Depend on godot-cpp being built first
+            [build_libartnet, create_marker_or_verify]
+        )
+    else:
+        libartnet_built = env.Command(
+            marker_target,
+            [godot_cpp_lib_file],  # Depend on godot-cpp being built first
+            [build_libartnet, create_marker]
+        )
     env.AlwaysBuild(libartnet_built)
     
     # Add libartnet include and library paths
