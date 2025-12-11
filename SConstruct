@@ -95,22 +95,52 @@ def build_libartnet(target, source, env):
             # Find the built library
             lib_file = os.path.join(build_path, "lib", "libartnet.a")
             if os.path.exists(lib_file):
-                # Verify the architecture of the built library
+                # Verify the architecture of the built library BEFORE adding to list
                 result = subprocess.run(["lipo", "-info", lib_file], capture_output=True, text=True)
                 if result.returncode == 0:
-                    # Check if the library has the expected architecture
                     arch_info = result.stdout.lower()
                     expected_arch = arch.lower()
-                    if expected_arch in arch_info or (arch == "x86_64" and "x86_64" in arch_info):
-                        lib_files.append(lib_file)
+                    
+                    # Check if the library has the expected architecture
+                    has_expected_arch = False
+                    if expected_arch == "arm64" and "arm64" in arch_info:
+                        has_expected_arch = True
+                    elif expected_arch == "x86_64" and ("x86_64" in arch_info or "x86_64" in arch_info):
+                        has_expected_arch = True
+                    
+                    if has_expected_arch:
+                        # Check for duplicate architectures in existing lib_files
+                        is_duplicate = False
+                        for existing_lib in lib_files:
+                            existing_result = subprocess.run(["lipo", "-info", existing_lib], capture_output=True, text=True)
+                            if existing_result.returncode == 0:
+                                existing_arch_info = existing_result.stdout.lower()
+                                # Check if both have the same architecture
+                                if "arm64" in arch_info and "arm64" in existing_arch_info:
+                                    is_duplicate = True
+                                    print("WARNING: Skipping {} - duplicate arm64 architecture (x86_64 build produced arm64)".format(lib_file))
+                                    break
+                                elif "x86_64" in arch_info and "x86_64" in existing_arch_info:
+                                    is_duplicate = True
+                                    print("WARNING: Skipping {} - duplicate x86_64 architecture".format(lib_file))
+                                    break
+                        
+                        if not is_duplicate:
+                            lib_files.append(lib_file)
+                        else:
+                            # Skip this library as it's a duplicate architecture
+                            continue
                     else:
                         print_error("Library {} has wrong architecture. Expected {}, got: {}".format(
                             lib_file, arch, result.stdout.strip()))
-                        # If we're on arm64 and trying to build x86_64, we might need to skip it
-                        # or the build might have produced the wrong arch
+                        # If we're on arm64 and trying to build x86_64, skip it
                         if arch == "x86_64" and "arm64" in arch_info:
                             print("WARNING: x86_64 build produced arm64 library. Skipping x86_64 for universal binary.")
                             continue
+                else:
+                    print_error("Failed to check architecture of library:", lib_file)
+                    # Add it anyway, but this might cause issues
+                    lib_files.append(lib_file)
         
         # Combine into universal binary
         if len(lib_files) >= 1:
