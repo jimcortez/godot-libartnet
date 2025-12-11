@@ -439,6 +439,11 @@ def _build_libartnet_windows(env, build_path, arch):
             os.makedirs(os.path.join(build_path, "include"), exist_ok=True)
             shutil.copytree(include_src, include_dst)
         
+        # On Windows, add a small delay after MSBuild to allow file handles to be released
+        if platform == "windows":
+            import time
+            time.sleep(0.5)  # Wait 500ms for file handles to be released
+        
     finally:
         os.chdir(original_dir)
     
@@ -452,24 +457,58 @@ if env['platform'] != "web":
     # Create marker file creation function
     def create_marker(target, source, env):
         marker_file = str(target[0])
+        marker_dir = os.path.dirname(marker_file)
+        
         # Ensure directory exists
-        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
+        try:
+            os.makedirs(marker_dir, exist_ok=True)
+        except (IOError, OSError):
+            # Directory might be locked, wait and retry
+            import time
+            time.sleep(0.2)
+            os.makedirs(marker_dir, exist_ok=True)
+        
         # Create marker file with retry logic for Windows file locking
         import time
-        max_retries = 5
-        retry_delay = 0.1
+        max_retries = 10
+        retry_delay = 0.2
         for attempt in range(max_retries):
             try:
-                with open(marker_file, 'w') as f:
-                    f.write("libartnet built successfully\n")
+                # Try to create/truncate the file
+                # Use 'x' mode first to ensure it doesn't exist, fall back to 'w'
+                try:
+                    with open(marker_file, 'x') as f:
+                        f.write("libartnet built successfully\n")
+                except FileExistsError:
+                    # File exists, just update it
+                    with open(marker_file, 'w') as f:
+                        f.write("libartnet built successfully\n")
                 break  # Success, exit retry loop
-            except (IOError, OSError) as e:
+            except (IOError, OSError, PermissionError) as e:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay = min(retry_delay * 1.5, 2.0)  # Exponential backoff, max 2s
                 else:
-                    # Last attempt failed, raise the error
-                    raise
+                    # Last attempt failed, try one more time with a longer delay
+                    time.sleep(1.0)
+                    try:
+                        with open(marker_file, 'w') as f:
+                            f.write("libartnet built successfully\n")
+                    except:
+                        # Final failure - print error but don't crash
+                        print_warning("Warning: Could not create marker file {}, but build succeeded".format(marker_file))
+                        # Try to create it in a different location as fallback
+                        alt_marker = marker_file + ".tmp"
+                        try:
+                            with open(alt_marker, 'w') as f:
+                                f.write("libartnet built successfully\n")
+                            # Try to rename it
+                            import time
+                            time.sleep(0.5)
+                            if os.path.exists(alt_marker):
+                                os.rename(alt_marker, marker_file)
+                        except:
+                            pass
         return 0
     
     # Build libartnet and create marker file
