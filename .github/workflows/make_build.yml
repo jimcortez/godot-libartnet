@@ -47,6 +47,17 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
 
+      # Install autotools for libartnet build (Linux and macOS)
+      - name: Install autotools (Linux)
+        if: ${{ matrix.target.platform == 'linux' || matrix.target.platform == 'android' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y autoconf automake libtool
+
+      - name: Install autotools (macOS)
+        if: ${{ matrix.target.platform == 'macos' }}
+        run: |
+          brew install autoconf automake libtool
+
       # Setup dependencies
       - name: Setup godot-cpp
         uses: ./godot-cpp/.github/actions/setup-godot-cpp
