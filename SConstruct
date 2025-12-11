@@ -44,6 +44,8 @@ Run the following command to download libartnet:
     git submodule update --init --recursive""")
     sys.exit(1)
 
+# Build godot-cpp library (the SConstruct automatically builds it via env.GodotCPP())
+# This returns the environment with godot-cpp library already set up
 env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
 
 # Build libartnet using autotools
@@ -64,13 +66,74 @@ def build_libartnet(target, source, env):
         print_error("libartnet submodule not found. Run: git submodule update --init --recursive")
         return 1
     
-    # Create build directory
-    build_path = os.path.join(libartnet_dir, ".build", platform)
-    if not os.path.exists(build_path):
-        os.makedirs(build_path)
+    # For macOS universal builds, we need to build for both architectures
+    if platform == "macos" and env.get('arch') == 'universal':
+        # Build for both arm64 and x86_64, then combine with lipo
+        archs = ['arm64', 'x86_64']
+        lib_files = []
+        
+        for arch in archs:
+            build_path = os.path.join(libartnet_dir, ".build", platform, arch)
+            if not os.path.exists(build_path):
+                os.makedirs(build_path)
+            
+            # Build for this architecture
+            if not _build_libartnet_arch(env, build_path, arch):
+                return 1
+            
+            # Find the built library
+            lib_file = os.path.join(build_path, "lib", "libartnet.a")
+            if os.path.exists(lib_file):
+                lib_files.append(lib_file)
+        
+        # Combine into universal binary
+        if len(lib_files) == 2:
+            universal_build_path = os.path.join(libartnet_dir, ".build", platform)
+            universal_lib_dir = os.path.join(universal_build_path, "lib")
+            if not os.path.exists(universal_lib_dir):
+                os.makedirs(universal_lib_dir)
+            
+            universal_lib = os.path.join(universal_lib_dir, "libartnet.a")
+            result = subprocess.run(["lipo", "-create", "-output", universal_lib] + lib_files, 
+                                  capture_output=True, text=True)
+            if result.returncode != 0:
+                print_error("lipo failed to create universal binary:", result.stderr)
+                return 1
+            
+            # Copy headers to universal build directory
+            include_src = os.path.join(libartnet_dir, ".build", platform, "arm64", "include")
+            include_dst = os.path.join(universal_build_path, "include")
+            if os.path.exists(include_src) and not os.path.exists(include_dst):
+                shutil.copytree(include_src, include_dst)
+        else:
+            print_error("Failed to build libartnet for all required architectures")
+            return 1
+    else:
+        # Single architecture build
+        build_path = os.path.join(libartnet_dir, ".build", platform)
+        if not os.path.exists(build_path):
+            os.makedirs(build_path)
+        
+        arch = env.get('arch', 'arm64' if platform == 'macos' else 'x86_64')
+        if not _build_libartnet_arch(env, build_path, arch):
+            return 1
+    
+    return 0
+
+def _build_libartnet_arch(env, build_path, arch):
+    """Build libartnet for a specific architecture"""
+    platform = env['platform']
     
     # Get configure flags based on platform
     configure_flags = []
+    
+    # For macOS, set architecture-specific flags
+    if platform == "macos":
+        if arch == "arm64":
+            configure_flags.extend(["CFLAGS=-arch arm64", "CXXFLAGS=-arch arm64"])
+        elif arch == "x86_64":
+            configure_flags.extend(["CFLAGS=-arch x86_64", "CXXFLAGS=-arch x86_64"])
+    
     
     # Handle cross-compilation for Android
     if platform == "android":
@@ -122,7 +185,7 @@ def build_libartnet(target, source, env):
             result = subprocess.run(["autoreconf", "-fi"], cwd=source_dir, capture_output=True, text=True)
             if result.returncode != 0:
                 print_error("autoreconf failed:", result.stderr)
-                return 1
+                return False
         
         # Now run configure in the build directory
         os.chdir(build_path)
@@ -134,36 +197,49 @@ def build_libartnet(target, source, env):
         result = subprocess.run(configure_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print_error("configure failed:", result.stderr)
-            return 1
+            return False
         
         # Run make
         result = subprocess.run(["make", "-j", str(os.cpu_count() or 4)], capture_output=True, text=True)
         if result.returncode != 0:
             print_error("make failed:", result.stderr)
-            return 1
+            return False
         
         # Run make install
         result = subprocess.run(["make", "install"], capture_output=True, text=True)
         if result.returncode != 0:
             print_error("make install failed:", result.stderr)
-            return 1
+            return False
         
     finally:
         os.chdir(original_dir)
     
-    # Create marker file to indicate build is complete
-    marker_file = os.path.join(build_path, ".built")
-    with open(marker_file, 'w') as f:
-        f.write("libartnet built successfully\n")
-    
-    return 0
+    return True
 
 # Build libartnet before building the extension
 if env['platform'] != "web":
+    # For universal macOS builds, use the universal build directory
+    if env['platform'] == "macos" and env.get('arch') == 'universal':
+        libartnet_build_dir = os.path.join(libartnet_dir, ".build", env['platform'])
+    
+    # Create marker file creation function
+    def create_marker(target, source, env):
+        marker_file = str(target[0])
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
+        with open(marker_file, 'w') as f:
+            f.write("libartnet built successfully\n")
+        return 0
+    
+    # Build libartnet and create marker file
+    # Ensure godot-cpp is built first
+    godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
+    godot_cpp_lib_file = env.File(godot_cpp_lib_path)
+    
     libartnet_built = env.Command(
         os.path.join(libartnet_build_dir, ".built"),
-        [],
-        build_libartnet
+        [godot_cpp_lib_file],  # Depend on godot-cpp being built first
+        [build_libartnet, create_marker]
     )
     env.AlwaysBuild(libartnet_built)
     
@@ -210,6 +286,12 @@ library = env.SharedLibrary(
     "bin/{}/{}".format(env['platform'], lib_filename),
     source=sources,
 )
+
+# Ensure godot-cpp library is built before our library
+# The godot-cpp SConstruct builds it automatically, but we make it an explicit dependency
+godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
+godot_cpp_lib_file = env.File(godot_cpp_lib_path)
+env.Depends(library, godot_cpp_lib_file)
 
 # Make libartnet build a dependency of the library
 if env['platform'] != "web":
