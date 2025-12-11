@@ -448,6 +448,8 @@ if env['platform'] != "web":
     # On Windows, the library is named libartnet.lib, on Unix it's libartnet.a
     if env['platform'] == "windows":
         env.Append(LIBS=["libartnet"])
+        # Windows socket libraries required by libartnet (ws2_32 for sockets, IPHLPAPI for network interface)
+        env.Append(LIBS=["ws2_32", "IPHLPAPI"])
     else:
         env.Append(LIBS=["artnet"])
 else:
