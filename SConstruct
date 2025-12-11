@@ -454,8 +454,22 @@ if env['platform'] != "web":
         marker_file = str(target[0])
         # Ensure directory exists
         os.makedirs(os.path.dirname(marker_file), exist_ok=True)
-        with open(marker_file, 'w') as f:
-            f.write("libartnet built successfully\n")
+        # Create marker file with retry logic for Windows file locking
+        import time
+        max_retries = 5
+        retry_delay = 0.1
+        for attempt in range(max_retries):
+            try:
+                with open(marker_file, 'w') as f:
+                    f.write("libartnet built successfully\n")
+                break  # Success, exit retry loop
+            except (IOError, OSError) as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Last attempt failed, raise the error
+                    raise
         return 0
     
     # Build libartnet and create marker file
