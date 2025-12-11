@@ -77,116 +77,14 @@ def build_libartnet(target, source, env):
         else:
             return 1
     
-    # For macOS universal builds, we need to build for both architectures
-    if platform == "macos" and env.get('arch') == 'universal':
-        # Build for both arm64 and x86_64, then combine with lipo
-        archs = ['arm64', 'x86_64']
-        lib_files = []
-        
-        for arch in archs:
-            build_path = os.path.join(libartnet_dir, ".build", platform, arch)
-            if not os.path.exists(build_path):
-                os.makedirs(build_path)
-            
-            # Build for this architecture
-            if not _build_libartnet_arch(env, build_path, arch):
-                return 1
-            
-            # Find the built library
-            lib_file = os.path.join(build_path, "lib", "libartnet.a")
-            if os.path.exists(lib_file):
-                # Verify the architecture of the built library BEFORE adding to list
-                result = subprocess.run(["lipo", "-info", lib_file], capture_output=True, text=True)
-                if result.returncode == 0:
-                    arch_info = result.stdout.lower()
-                    expected_arch = arch.lower()
-                    
-                    # Extract actual architecture from lipo output
-                    actual_arch = None
-                    if "arm64" in arch_info:
-                        actual_arch = "arm64"
-                    elif "x86_64" in arch_info or "i386" in arch_info:
-                        actual_arch = "x86_64"
-                    
-                    # Check if the library has the expected architecture
-                    if actual_arch == expected_arch:
-                        # Check for duplicate architectures in existing lib_files
-                        is_duplicate = False
-                        for existing_lib in lib_files:
-                            existing_result = subprocess.run(["lipo", "-info", existing_lib], capture_output=True, text=True)
-                            if existing_result.returncode == 0:
-                                existing_arch_info = existing_result.stdout.lower()
-                                existing_actual_arch = None
-                                if "arm64" in existing_arch_info:
-                                    existing_actual_arch = "arm64"
-                                elif "x86_64" in existing_arch_info or "i386" in existing_arch_info:
-                                    existing_actual_arch = "x86_64"
-                                
-                                # Check if both have the same architecture
-                                if actual_arch and existing_actual_arch and actual_arch == existing_actual_arch:
-                                    is_duplicate = True
-                                    print("WARNING: Skipping {} - duplicate {} architecture ({} build produced {})".format(
-                                        lib_file, actual_arch, arch, actual_arch))
-                                    break
-                        
-                        if not is_duplicate:
-                            lib_files.append(lib_file)
-                        # else: already skipped above
-                    else:
-                        # Library has wrong architecture
-                        print("WARNING: Library {} has wrong architecture. Expected {}, got: {} (skipping)".format(
-                            lib_file, expected_arch, result.stdout.strip()))
-                        # Skip this library - it doesn't have the expected architecture
-                        continue
-                else:
-                    print_error("Failed to check architecture of library:", lib_file)
-                    print_error("lipo output:", result.stderr)
-                    # Don't add it - we can't verify its architecture
-                    continue
-        
-        # Combine into universal binary
-        if len(lib_files) >= 1:
-            universal_build_path = os.path.join(libartnet_dir, ".build", platform)
-            universal_lib_dir = os.path.join(universal_build_path, "lib")
-            if not os.path.exists(universal_lib_dir):
-                os.makedirs(universal_lib_dir)
-            
-            universal_lib = os.path.join(universal_lib_dir, "libartnet.a")
-            
-            if len(lib_files) == 2:
-                # Combine both architectures
-                result = subprocess.run(["lipo", "-create", "-output", universal_lib] + lib_files, 
-                                      capture_output=True, text=True)
-                if result.returncode != 0:
-                    print_error("lipo failed to create universal binary:", result.stderr)
-                    return 1
-            elif len(lib_files) == 1:
-                # Only one architecture available, just copy it
-                print("WARNING: Only one architecture available for universal binary. Using single-arch library.")
-                shutil.copy2(lib_files[0], universal_lib)
-            else:
-                print_error("Failed to build libartnet for any required architectures")
-                return 1
-            
-            # Copy headers to universal build directory
-            include_src = os.path.join(libartnet_dir, ".build", platform, "arm64", "include")
-            if not os.path.exists(include_src):
-                include_src = os.path.join(libartnet_dir, ".build", platform, "x86_64", "include")
-            include_dst = os.path.join(universal_build_path, "include")
-            if os.path.exists(include_src) and not os.path.exists(include_dst):
-                shutil.copytree(include_src, include_dst)
-        else:
-            print_error("Failed to build libartnet for any required architectures")
-            return 1
-    else:
-        # Single architecture build
-        build_path = os.path.join(libartnet_dir, ".build", platform)
-        if not os.path.exists(build_path):
-            os.makedirs(build_path)
-        
-        arch = env.get('arch', 'arm64' if platform == 'macos' else 'x86_64')
-        if not _build_libartnet_arch(env, build_path, arch):
-            return 1
+    # Single architecture build (including macOS arm64 and x86_64)
+    build_path = os.path.join(libartnet_dir, ".build", platform)
+    if not os.path.exists(build_path):
+        os.makedirs(build_path)
+    
+    arch = env.get('arch', 'arm64' if platform == 'macos' else 'x86_64')
+    if not _build_libartnet_arch(env, build_path, arch):
+        return 1
     
     return 0
 
@@ -527,8 +425,8 @@ if env["target"] in ["editor", "template_debug"]:
         print("Not including class reference as we're targeting a pre-4.3 baseline.")
 
 # .dev doesn't inhibit compatibility, so we don't need to key it.
-# .universal just means "compatible with all relevant arches" so we don't need to key it.
-suffix = env['suffix'].replace(".dev", "").replace(".universal", "")
+# Clean up suffix
+suffix = env['suffix'].replace(".dev", "")
 
 lib_filename = "{}{}{}{}".format(env.subst('$SHLIBPREFIX'), libname, suffix, env.subst('$SHLIBSUFFIX'))
 
