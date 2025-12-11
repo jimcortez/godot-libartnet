@@ -334,6 +334,10 @@ def _build_libartnet_windows(env, build_path, arch):
         if not out_dir.endswith("\\"):
             out_dir = out_dir + "\\"
         
+        # Determine platform toolset - use v143 (VS 2022) or v142 (VS 2019) if available
+        # Default to v143 which should be available on GitHub Actions
+        platform_toolset = "v143"  # Visual Studio 2022
+        
         msbuild_cmd = [
             msbuild,
             solution_file,
@@ -342,6 +346,7 @@ def _build_libartnet_windows(env, build_path, arch):
             "/p:Platform=" + msbuild_platform,
             "/p:OutDir=" + out_dir,
             "/p:WindowsTargetPlatformVersion=10.0",  # Override SDK version to use available SDK
+            "/p:PlatformToolset=" + platform_toolset,  # Override toolset to use available version
             "/v:minimal",  # Minimal verbosity
             "/nologo",  # Suppress MSBuild banner
         ]
