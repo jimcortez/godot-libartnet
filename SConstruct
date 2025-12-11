@@ -53,7 +53,7 @@ libartnet_dir = "libartnet"
 libartnet_build_dir = os.path.join("libartnet", ".build", env['platform'])
 
 def build_libartnet(target, source, env):
-    """Build libartnet using autotools"""
+    """Build libartnet using autotools (Linux/macOS/Android) or MSBuild (Windows)"""
     platform = env['platform']
     
     # For WASM, provide stub implementation
@@ -65,6 +65,17 @@ def build_libartnet(target, source, env):
     if not os.path.isdir(libartnet_dir):
         print_error("libartnet submodule not found. Run: git submodule update --init --recursive")
         return 1
+    
+    # Handle Windows builds using MSBuild (not autotools)
+    if platform == "windows":
+        build_path = os.path.join(libartnet_dir, ".build", platform)
+        if not os.path.exists(build_path):
+            os.makedirs(build_path)
+        arch = env.get('arch', 'x86_64')
+        if _build_libartnet_windows(env, build_path, arch):
+            return 0
+        else:
+            return 1
     
     # For macOS universal builds, we need to build for both architectures
     if platform == "macos" and env.get('arch') == 'universal':
@@ -123,6 +134,10 @@ def build_libartnet(target, source, env):
 def _build_libartnet_arch(env, build_path, arch):
     """Build libartnet for a specific architecture"""
     platform = env['platform']
+    
+    # Handle Windows builds using MSBuild
+    if platform == "windows":
+        return _build_libartnet_windows(env, build_path, arch)
     
     # Get configure flags based on platform
     configure_flags = []
@@ -226,6 +241,147 @@ def _build_libartnet_arch(env, build_path, arch):
     
     return True
 
+def _build_libartnet_windows(env, build_path, arch):
+    """Build libartnet on Windows using MSBuild"""
+    original_dir = os.getcwd()
+    source_dir = os.path.abspath(libartnet_dir)
+    msvc_dir = os.path.join(source_dir, "msvc", "libartnet")
+    solution_file = os.path.join(msvc_dir, "libartnet.sln")
+    
+    if not os.path.exists(solution_file):
+        print_error("libartnet Visual Studio solution not found:", solution_file)
+        return False
+    
+    try:
+        # Determine build configuration and platform
+        target_type = env.get('target', 'template_release')
+        if 'debug' in target_type.lower():
+            config = "Debug"
+        else:
+            config = "Release"
+        
+        # Map architecture
+        if arch == "x86_64" or arch == "x64":
+            msbuild_platform = "x64"
+        elif arch == "x86_32" or arch == "x86":
+            msbuild_platform = "Win32"
+        else:
+            msbuild_platform = "x64"  # Default to x64
+        
+        # Find MSBuild
+        # Try common MSBuild locations
+        msbuild_paths = [
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Microsoft Visual Studio", "2022", "Community", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Microsoft Visual Studio", "2022", "Enterprise", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Microsoft Visual Studio", "2022", "Professional", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Microsoft Visual Studio", "2019", "Community", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Microsoft Visual Studio", "2019", "Enterprise", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Microsoft Visual Studio", "2019", "Professional", "MSBuild", "Current", "Bin", "MSBuild.exe"),
+            "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
+            "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe",
+            "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\MSBuild\\Current\\Bin\\MSBuild.exe",
+        ]
+        
+        # Also try to find MSBuild in PATH
+        msbuild = shutil.which("msbuild.exe") or shutil.which("MSBuild.exe")
+        
+        if not msbuild:
+            for path in msbuild_paths:
+                if os.path.exists(path):
+                    msbuild = path
+                    break
+        
+        if not msbuild:
+            print_error("MSBuild not found. Please install Visual Studio or ensure MSBuild is in PATH.")
+            return False
+        
+        # Build the solution
+        os.chdir(msvc_dir)
+        msbuild_cmd = [
+            msbuild,
+            solution_file,
+            "/t:libartnet",
+            "/p:Configuration=" + config,
+            "/p:Platform=" + msbuild_platform,
+            "/p:OutDir=" + os.path.abspath(os.path.join(build_path, "lib")) + "\\",
+        ]
+        
+        result = subprocess.run(msbuild_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print_error("MSBuild failed:", result.stderr)
+            return False
+        
+        # MSBuild outputs to a specific directory structure
+        # Find the built library (libartnet.lib)
+        # The output directory structure varies, so we need to search
+        lib_dir = os.path.join(build_path, "lib")
+        if not os.path.exists(lib_dir):
+            os.makedirs(lib_dir)
+        
+        # MSBuild typically outputs to msvc/libartnet/{Config}/{Platform}/
+        # or to the OutDir we specified
+        possible_lib_paths = [
+            os.path.join(build_path, "lib", "libartnet.lib"),  # Our specified OutDir
+            os.path.join(msvc_dir, config, msbuild_platform, "libartnet.lib"),
+            os.path.join(msvc_dir, msbuild_platform, config, "libartnet.lib"),
+            os.path.join(msvc_dir, "..", "..", config, msbuild_platform, "libartnet.lib"),
+        ]
+        
+        # Also check common Visual Studio output locations
+        vs_output_dirs = [
+            os.path.join(os.path.dirname(msvc_dir), "..", "..", "..", "..", ".."),
+            os.path.join(os.path.dirname(source_dir), ".."),
+        ]
+        for vs_output_base in vs_output_dirs:
+            if os.path.exists(vs_output_base):
+                possible_lib_paths.extend([
+                    os.path.join(vs_output_base, "libartnet", config, msbuild_platform, "libartnet.lib"),
+                    os.path.join(vs_output_base, "libartnet", msbuild_platform, config, "libartnet.lib"),
+                ])
+        
+        lib_found = False
+        for lib_path in possible_lib_paths:
+            if os.path.exists(lib_path):
+                # Copy to expected location
+                shutil.copy2(lib_path, os.path.join(lib_dir, "libartnet.lib"))
+                lib_found = True
+                break
+        
+        if not lib_found:
+            # Try to find any .lib file in the msvc directory tree
+            for root, dirs, files in os.walk(msvc_dir):
+                for file in files:
+                    if file == "libartnet.lib":
+                        lib_path = os.path.join(root, file)
+                        shutil.copy2(lib_path, os.path.join(lib_dir, "libartnet.lib"))
+                        lib_found = True
+                        break
+                if lib_found:
+                    break
+        
+        if not lib_found:
+            # Last resort: check if MSBuild created it in the OutDir we specified
+            final_lib_path = os.path.join(lib_dir, "libartnet.lib")
+            if os.path.exists(final_lib_path):
+                lib_found = True
+            else:
+                print_error("Could not find built libartnet.lib file. Searched in:")
+                for path in possible_lib_paths[:5]:  # Show first 5 paths
+                    print_error("  -", path)
+                return False
+        
+        # Copy headers to include directory
+        include_src = os.path.join(source_dir, "artnet")
+        include_dst = os.path.join(build_path, "include", "artnet")
+        if os.path.exists(include_src) and not os.path.exists(include_dst):
+            os.makedirs(os.path.join(build_path, "include"), exist_ok=True)
+            shutil.copytree(include_src, include_dst)
+        
+    finally:
+        os.chdir(original_dir)
+    
+    return True
+
 # Build libartnet before building the extension
 if env['platform'] != "web":
     # For universal macOS builds, use the universal build directory
@@ -260,7 +416,11 @@ if env['platform'] != "web":
     
     env.Append(CPPPATH=[libartnet_include])
     env.Append(LIBPATH=[libartnet_lib_dir])
-    env.Append(LIBS=["artnet"])
+    # On Windows, the library is named libartnet.lib, on Unix it's libartnet.a
+    if env['platform'] == "windows":
+        env.Append(LIBS=["libartnet"])
+    else:
+        env.Append(LIBS=["artnet"])
 else:
     # For WASM, we'll need to handle this differently or provide stubs
     # For now, just add the include path so headers can be found
