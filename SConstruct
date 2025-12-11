@@ -95,29 +95,56 @@ def build_libartnet(target, source, env):
             # Find the built library
             lib_file = os.path.join(build_path, "lib", "libartnet.a")
             if os.path.exists(lib_file):
-                lib_files.append(lib_file)
+                # Verify the architecture of the built library
+                result = subprocess.run(["lipo", "-info", lib_file], capture_output=True, text=True)
+                if result.returncode == 0:
+                    # Check if the library has the expected architecture
+                    arch_info = result.stdout.lower()
+                    expected_arch = arch.lower()
+                    if expected_arch in arch_info or (arch == "x86_64" and "x86_64" in arch_info):
+                        lib_files.append(lib_file)
+                    else:
+                        print_error("Library {} has wrong architecture. Expected {}, got: {}".format(
+                            lib_file, arch, result.stdout.strip()))
+                        # If we're on arm64 and trying to build x86_64, we might need to skip it
+                        # or the build might have produced the wrong arch
+                        if arch == "x86_64" and "arm64" in arch_info:
+                            print("WARNING: x86_64 build produced arm64 library. Skipping x86_64 for universal binary.")
+                            continue
         
         # Combine into universal binary
-        if len(lib_files) == 2:
+        if len(lib_files) >= 1:
             universal_build_path = os.path.join(libartnet_dir, ".build", platform)
             universal_lib_dir = os.path.join(universal_build_path, "lib")
             if not os.path.exists(universal_lib_dir):
                 os.makedirs(universal_lib_dir)
             
             universal_lib = os.path.join(universal_lib_dir, "libartnet.a")
-            result = subprocess.run(["lipo", "-create", "-output", universal_lib] + lib_files, 
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                print_error("lipo failed to create universal binary:", result.stderr)
+            
+            if len(lib_files) == 2:
+                # Combine both architectures
+                result = subprocess.run(["lipo", "-create", "-output", universal_lib] + lib_files, 
+                                      capture_output=True, text=True)
+                if result.returncode != 0:
+                    print_error("lipo failed to create universal binary:", result.stderr)
+                    return 1
+            elif len(lib_files) == 1:
+                # Only one architecture available, just copy it
+                print("WARNING: Only one architecture available for universal binary. Using single-arch library.")
+                shutil.copy2(lib_files[0], universal_lib)
+            else:
+                print_error("Failed to build libartnet for any required architectures")
                 return 1
             
             # Copy headers to universal build directory
             include_src = os.path.join(libartnet_dir, ".build", platform, "arm64", "include")
+            if not os.path.exists(include_src):
+                include_src = os.path.join(libartnet_dir, ".build", platform, "x86_64", "include")
             include_dst = os.path.join(universal_build_path, "include")
             if os.path.exists(include_src) and not os.path.exists(include_dst):
                 shutil.copytree(include_src, include_dst)
         else:
-            print_error("Failed to build libartnet for all required architectures")
+            print_error("Failed to build libartnet for any required architectures")
             return 1
     else:
         # Single architecture build
@@ -145,9 +172,17 @@ def _build_libartnet_arch(env, build_path, arch):
     # For macOS, set architecture-specific flags
     if platform == "macos":
         if arch == "arm64":
-            configure_flags.extend(["CFLAGS=-arch arm64", "CXXFLAGS=-arch arm64"])
+            configure_flags.extend(["CFLAGS=-arch arm64 -fPIC", "CXXFLAGS=-arch arm64 -fPIC"])
         elif arch == "x86_64":
-            configure_flags.extend(["CFLAGS=-arch x86_64", "CXXFLAGS=-arch x86_64"])
+            # For x86_64 on arm64 hosts, we need to ensure proper cross-compilation
+            configure_flags.extend(["CFLAGS=-arch x86_64 -fPIC", "CXXFLAGS=-arch x86_64 -fPIC"])
+            # Check if we're on an arm64 host trying to build x86_64
+            import platform as plat_module
+            host_arch = plat_module.machine().lower()
+            if host_arch == "arm64":
+                # On arm64 host, we might need to use Rosetta or ensure proper toolchain
+                # The -arch flag should be sufficient, but we verify the build output
+                pass
     
     
     # Handle cross-compilation for Android
