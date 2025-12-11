@@ -369,9 +369,8 @@ def _build_libartnet_windows(env, build_path, arch):
 
 # Build libartnet before building the extension
 if env['platform'] != "web":
-    # For universal macOS builds, use the universal build directory
-    if env['platform'] == "macos" and env.get('arch') == 'universal':
-        libartnet_build_dir = os.path.join(libartnet_dir, ".build", env['platform'])
+    # Use platform-specific build directory
+    libartnet_build_dir = os.path.join(libartnet_dir, ".build", env['platform'])
     
     # Create marker file creation function
     def create_marker(target, source, env):
