@@ -208,6 +208,17 @@ def _build_libartnet_arch(env, build_path, arch):
         # We need to override CFLAGS to disable -Werror and specific warnings
         # Also ensure -fPIC is included for shared library linking
         make_env = os.environ.copy()
+        
+        # For Android, preserve the PATH and other environment variables from godot-cpp
+        if platform == "android":
+            # Use the same environment that godot-cpp set up
+            if 'ENV' in env:
+                make_env.update(env['ENV'])
+            # Ensure PATH includes Android NDK toolchain
+            if 'ENV' in env and 'PATH' in env['ENV']:
+                existing_path = make_env.get('PATH', '')
+                make_env['PATH'] = env['ENV']['PATH'] + os.pathsep + existing_path
+        
         # Disable -Werror and specific warnings that cause issues with libartnet code
         # Append to existing CFLAGS if set by configure, otherwise set new ones
         cflags_extra = "-fPIC -Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
