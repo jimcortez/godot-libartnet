@@ -133,30 +133,33 @@ def _build_libartnet_arch(env, build_path, arch):
             print_error("CC and CXX not set in environment. Android NDK toolchain may not be configured.")
             return False
         
-        # Map architecture to Android host triple
+        # Map architecture to Android target triple and march flags
+        # This must match what godot-cpp uses in tools/android.py
         arch = env.get('arch', 'arm64')
-        if arch == 'arm64':
-            host = 'aarch64-linux-android'
-        elif arch == 'arm32':
-            host = 'armv7a-linux-androideabi'
-        elif arch == 'x86_64':
-            host = 'x86_64-linux-android'
-        elif arch == 'x86_32':
-            host = 'i686-linux-android'
-        else:
-            host = 'aarch64-linux-android'
+        arch_info_table = {
+            'arm64': {'target': 'aarch64-linux-android', 'march': 'armv8-a', 'host': 'aarch64-linux-android'},
+            'arm32': {'target': 'armv7a-linux-androideabi', 'march': 'armv7-a', 'host': 'armv7a-linux-androideabi'},
+            'x86_64': {'target': 'x86_64-linux-android', 'march': 'x86-64', 'host': 'x86_64-linux-android'},
+            'x86_32': {'target': 'i686-linux-android', 'march': 'i686', 'host': 'i686-linux-android'},
+        }
+        arch_info = arch_info_table.get(arch, arch_info_table['arm64'])
+        host = arch_info['host']
         
         # Get API level from environment (set by godot-cpp)
         api_level = env.get('android_api_level', os.environ.get('ANDROID_API_LEVEL', '21'))
         
-        # Get CCFLAGS from environment to preserve target and architecture flags
-        ccflags = env.get('CCFLAGS', [])
-        cflags_str = ' '.join(ccflags) if isinstance(ccflags, list) else str(ccflags)
-        cxxflags_str = cflags_str  # Use same flags for CXX
+        # Construct CFLAGS directly with the correct --target flag for clang cross-compilation
+        # The --target flag is CRITICAL for clang to generate code for the correct architecture
+        # Format: --target=<arch>-linux-android<api_level>
+        target_flag = "--target={}{}".format(arch_info['target'], api_level)
+        march_flag = "-march={}".format(arch_info['march'])
         
-        # Add Android-specific defines and ensure -fPIC
-        cflags_str = "-fPIC -DANDROID " + cflags_str
-        cxxflags_str = "-fPIC -DANDROID " + cxxflags_str
+        cflags_str = "{} {} -fPIC -DANDROID".format(target_flag, march_flag)
+        cxxflags_str = cflags_str
+        
+        # Also get AR and RANLIB from the NDK for creating static libraries
+        ar = env.get('AR', None)
+        ranlib = env.get('RANLIB', None)
         
         configure_flags.extend([
             "--host={}".format(host),
@@ -165,6 +168,12 @@ def _build_libartnet_arch(env, build_path, arch):
             "CFLAGS={}".format(cflags_str),
             "CXXFLAGS={}".format(cxxflags_str),
         ])
+        
+        # Add AR and RANLIB if available from the NDK
+        if ar:
+            configure_flags.append("AR={}".format(ar))
+        if ranlib:
+            configure_flags.append("RANLIB={}".format(ranlib))
     
     # Run autotools build process
     original_dir = os.getcwd()
@@ -245,13 +254,25 @@ def _build_libartnet_arch(env, build_path, arch):
             if 'ENV' in env and 'PATH' in env['ENV']:
                 existing_path = make_env.get('PATH', '')
                 make_env['PATH'] = env['ENV']['PATH'] + os.pathsep + existing_path
+            # Set CC/CXX in environment for make to use
+            if cc:
+                make_env['CC'] = cc
+            if cxx:
+                make_env['CXX'] = cxx
         
         # Disable -Werror and specific warnings that cause issues with libartnet code
         # Append to existing CFLAGS if set by configure, otherwise set new ones
         cflags_extra = "-fPIC -Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
-        # Read Makefile to see what CFLAGS configure set, then override
-        # The safest approach is to pass CFLAGS directly to make
-        make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
+        
+        # For Android, we need to pass the full CFLAGS including the target flag
+        # because make might not preserve them correctly from configure
+        if platform == "android":
+            # Use the cflags_str we already constructed with --target
+            make_cflags = cflags_str + " " + cflags_extra
+            make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS=" + make_cflags]
+        else:
+            # For other platforms, just append to existing CFLAGS
+            make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
         
         result = subprocess.run(make_cmd, capture_output=True, text=True, env=make_env)
         if result.returncode != 0:
@@ -349,6 +370,7 @@ def _build_libartnet_windows(env, build_path, arch):
             "/p:PlatformToolset=" + platform_toolset,  # Override toolset to use available version
             "/v:minimal",  # Minimal verbosity
             "/nologo",  # Suppress MSBuild banner
+            "/nodeReuse:false",  # Don't keep MSBuild nodes alive - helps release file handles
         ]
         
         print("Running MSBuild command:", " ".join(msbuild_cmd))
@@ -463,8 +485,8 @@ if env['platform'] != "web":
         # If the library exists, we can skip marker creation if it fails
         platform = env.get('platform', '')
         if platform == "windows":
-            libartnet_build_dir = os.path.join(libartnet_dir, ".build", "windows")
-            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+            win_build_dir = os.path.join(libartnet_dir, ".build", "windows")
+            lib_file = os.path.join(win_build_dir, "lib", "libartnet.lib")
             build_succeeded = os.path.exists(lib_file)
         else:
             build_succeeded = True
@@ -528,13 +550,23 @@ if env['platform'] != "web":
     godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
     godot_cpp_lib_file = env.File(godot_cpp_lib_path)
     
-    # For Windows, create a custom action that checks library file if marker creation fails
-    marker_target = os.path.join(libartnet_build_dir, ".built")
+    # Place marker file OUTSIDE the build directory to avoid Windows file locking issues
+    # On Windows, the .build directory tree may be locked by antivirus/indexing after MSBuild
+    # Using a separate .markers directory in the project root avoids these issues
+    markers_dir = ".markers"
+    marker_target = os.path.join(markers_dir, "libartnet.{}.built".format(env['platform']))
+    
     if env['platform'] == "windows":
         def create_marker_or_verify(target, source, env):
             """Create marker file, or verify library exists if marker creation fails"""
             marker_file = str(target[0])
-            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+            win_build_dir = os.path.join(libartnet_dir, ".build", "windows")
+            lib_file = os.path.join(win_build_dir, "lib", "libartnet.lib")
+            
+            # Wait for file handles to be released after MSBuild
+            # This is necessary because Windows Defender and indexing services may hold handles
+            import time
+            time.sleep(1.0)
             
             # Try to create marker file
             try:
@@ -548,6 +580,8 @@ if env['platform'] != "web":
                     # Library exists, build succeeded - create a dummy marker
                     # Use a different approach: touch the file using os.utime
                     try:
+                        # Ensure marker directory exists
+                        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
                         # Create empty file by opening and closing
                         open(marker_file, 'a').close()
                         os.utime(marker_file, None)  # Update timestamp
