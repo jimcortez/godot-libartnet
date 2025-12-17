@@ -472,141 +472,67 @@ def _build_libartnet_windows(env, build_path, arch):
     return True
 
 # Build libartnet before building the extension
+libartnet_built = None  # Will be set to a SCons target for non-Windows platforms
+
 if env['platform'] != "web":
     # Use platform-specific build directory
     libartnet_build_dir = os.path.join(libartnet_dir, ".build", env['platform'])
     
-    # Create marker file creation function
-    def create_marker(target, source, env):
-        marker_file = str(target[0])
-        marker_dir = os.path.dirname(marker_file)
-        
-        # On Windows, verify the build actually succeeded by checking for the library file
-        # If the library exists, we can skip marker creation if it fails
-        platform = env.get('platform', '')
-        if platform == "windows":
-            win_build_dir = os.path.join(libartnet_dir, ".build", "windows")
-            lib_file = os.path.join(win_build_dir, "lib", "libartnet.lib")
-            build_succeeded = os.path.exists(lib_file)
-        else:
-            build_succeeded = True
-        
-        # Ensure directory exists
-        try:
-            os.makedirs(marker_dir, exist_ok=True)
-        except (IOError, OSError):
-            # Directory might be locked, wait and retry
-            import time
-            time.sleep(0.2)
-            try:
-                os.makedirs(marker_dir, exist_ok=True)
-            except (IOError, OSError):
-                if not build_succeeded:
-                    # Build didn't succeed, we need the marker to fail
-                    raise
-                # Build succeeded, directory creation failure is non-fatal
-                pass
-        
-        # Create marker file with retry logic for Windows file locking
-        import time
-        max_retries = 10
-        retry_delay = 0.2
-        marker_created = False
-        
-        for attempt in range(max_retries):
-            try:
-                # Try to create/truncate the file
-                # Use 'x' mode first to ensure it doesn't exist, fall back to 'w'
-                try:
-                    with open(marker_file, 'x') as f:
-                        f.write("libartnet built successfully\n")
-                except FileExistsError:
-                    # File exists, just update it
-                    with open(marker_file, 'w') as f:
-                        f.write("libartnet built successfully\n")
-                marker_created = True
-                break  # Success, exit retry loop
-            except (IOError, OSError, PermissionError) as e:
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 1.5, 2.0)  # Exponential backoff, max 2s
-                else:
-                    # All retries exhausted
-                    if build_succeeded:
-                        # Build succeeded but marker creation failed - this is non-fatal on Windows
-                        # The library file existing is proof the build succeeded
-                        print("Warning: Could not create marker file {}, but build succeeded (library file exists)".format(marker_file))
-                        marker_created = False
-                    else:
-                        # Build didn't succeed, marker creation failure indicates a problem
-                        raise
-        
-        # If marker creation failed but build succeeded, that's OK
-        # SCons will check the library file existence as a fallback
-        return 0
-    
-    # Build libartnet and create marker file
-    # Ensure godot-cpp is built first
-    godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
-    godot_cpp_lib_file = env.File(godot_cpp_lib_path)
-    
-    # Place marker file OUTSIDE the build directory to avoid Windows file locking issues
-    # On Windows, the .build directory tree may be locked by antivirus/indexing after MSBuild
-    # Using a separate .markers directory in the project root avoids these issues
-    markers_dir = ".markers"
-    marker_target = os.path.join(markers_dir, "libartnet.{}.built".format(env['platform']))
-    
+    # For Windows, we build libartnet synchronously during SConstruct processing
+    # to avoid SCons marker file locking issues. SCons has known issues with
+    # target file management on Windows where file handles aren't released properly.
+    # See: https://github.com/actions/runner/issues/2687 and similar issues
     if env['platform'] == "windows":
-        def create_marker_or_verify(target, source, env):
-            """Create marker file, or verify library exists if marker creation fails"""
+        # Check if libartnet needs to be built
+        win_lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+        
+        # Build libartnet synchronously (not as a SCons target)
+        # This avoids Windows file locking issues with SCons marker files
+        print("Building libartnet for Windows...")
+        build_result = build_libartnet(None, None, env)
+        if build_result != 0:
+            print_error("Failed to build libartnet for Windows")
+            sys.exit(1)
+        
+        if not os.path.exists(win_lib_file):
+            print_error("libartnet build completed but library not found at:", win_lib_file)
+            sys.exit(1)
+        
+        print("libartnet built successfully for Windows")
+        
+        # No marker file needed - the library file itself is proof of build
+        libartnet_built = None
+    else:
+        # For non-Windows platforms, use normal SCons Command with marker file
+        # Create marker file creation function
+        def create_marker(target, source, env):
             marker_file = str(target[0])
-            win_build_dir = os.path.join(libartnet_dir, ".build", "windows")
-            lib_file = os.path.join(win_build_dir, "lib", "libartnet.lib")
+            marker_dir = os.path.dirname(marker_file)
             
-            # Wait for file handles to be released after MSBuild
-            # This is necessary because Windows Defender and indexing services may hold handles
-            import time
-            time.sleep(1.0)
+            # Ensure directory exists
+            os.makedirs(marker_dir, exist_ok=True)
             
-            # Try to create marker file
-            try:
-                result = create_marker(target, source, env)
-            except:
-                result = 1
+            # Create marker file
+            with open(marker_file, 'w') as f:
+                f.write("libartnet built successfully\n")
             
-            # If marker creation failed, check if library exists
-            if result != 0 or not os.path.exists(marker_file):
-                if os.path.exists(lib_file):
-                    # Library exists, build succeeded - create a dummy marker
-                    # Use a different approach: touch the file using os.utime
-                    try:
-                        # Ensure marker directory exists
-                        os.makedirs(os.path.dirname(marker_file), exist_ok=True)
-                        # Create empty file by opening and closing
-                        open(marker_file, 'a').close()
-                        os.utime(marker_file, None)  # Update timestamp
-                    except:
-                        # Even that failed - but library exists, so build succeeded
-                        # Return 0 to indicate success
-                        pass
-                    return 0
-                else:
-                    # Library doesn't exist, build failed
-                    return 1
             return 0
         
-        libartnet_built = env.Command(
-            marker_target,
-            [godot_cpp_lib_file],  # Depend on godot-cpp being built first
-            [build_libartnet, create_marker_or_verify]
-        )
-    else:
+        # Build libartnet and create marker file
+        # Ensure godot-cpp is built first
+        godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
+        godot_cpp_lib_file = env.File(godot_cpp_lib_path)
+        
+        # Place marker file in .markers directory
+        markers_dir = ".markers"
+        marker_target = os.path.join(markers_dir, "libartnet.{}.built".format(env['platform']))
+        
         libartnet_built = env.Command(
             marker_target,
             [godot_cpp_lib_file],  # Depend on godot-cpp being built first
             [build_libartnet, create_marker]
         )
-    env.AlwaysBuild(libartnet_built)
+        env.AlwaysBuild(libartnet_built)
     
     # Add libartnet include and library paths
     # Headers are installed in include/artnet/ directory
@@ -647,7 +573,8 @@ suffix = env['suffix'].replace(".dev", "")
 lib_filename = "{}{}{}{}".format(env.subst('$SHLIBPREFIX'), libname, suffix, env.subst('$SHLIBSUFFIX'))
 
 # Make libartnet build a dependency before creating the library
-if env['platform'] != "web":
+# (Not needed for Windows since libartnet is built synchronously during SConstruct)
+if env['platform'] != "web" and libartnet_built is not None:
     # Ensure libartnet is built before we try to compile sources
     # Make each source file depend on libartnet_built
     for source in sources:
@@ -665,7 +592,8 @@ godot_cpp_lib_file = env.File(godot_cpp_lib_path)
 env.Depends(library, godot_cpp_lib_file)
 
 # Make libartnet build a dependency of the library
-if env['platform'] != "web":
+# (Not needed for Windows since libartnet is built synchronously during SConstruct)
+if env['platform'] != "web" and libartnet_built is not None:
     env.Depends(library, libartnet_built)
 
 copy = env.Install("{}/bin/{}/".format(projectdir, env["platform"]), library)
