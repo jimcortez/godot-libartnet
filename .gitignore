@@ -1,5 +1,7 @@
 .cache/
 bin/
+.markers/
+libartnet/.build/
 
 
 # Godot auto generated files

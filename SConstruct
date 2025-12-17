@@ -133,30 +133,33 @@ def _build_libartnet_arch(env, build_path, arch):
             print_error("CC and CXX not set in environment. Android NDK toolchain may not be configured.")
             return False
         
-        # Map architecture to Android host triple
+        # Map architecture to Android target triple and march flags
+        # This must match what godot-cpp uses in tools/android.py
         arch = env.get('arch', 'arm64')
-        if arch == 'arm64':
-            host = 'aarch64-linux-android'
-        elif arch == 'arm32':
-            host = 'armv7a-linux-androideabi'
-        elif arch == 'x86_64':
-            host = 'x86_64-linux-android'
-        elif arch == 'x86_32':
-            host = 'i686-linux-android'
-        else:
-            host = 'aarch64-linux-android'
+        arch_info_table = {
+            'arm64': {'target': 'aarch64-linux-android', 'march': 'armv8-a', 'host': 'aarch64-linux-android'},
+            'arm32': {'target': 'armv7a-linux-androideabi', 'march': 'armv7-a', 'host': 'armv7a-linux-androideabi'},
+            'x86_64': {'target': 'x86_64-linux-android', 'march': 'x86-64', 'host': 'x86_64-linux-android'},
+            'x86_32': {'target': 'i686-linux-android', 'march': 'i686', 'host': 'i686-linux-android'},
+        }
+        arch_info = arch_info_table.get(arch, arch_info_table['arm64'])
+        host = arch_info['host']
         
         # Get API level from environment (set by godot-cpp)
         api_level = env.get('android_api_level', os.environ.get('ANDROID_API_LEVEL', '21'))
         
-        # Get CCFLAGS from environment to preserve target and architecture flags
-        ccflags = env.get('CCFLAGS', [])
-        cflags_str = ' '.join(ccflags) if isinstance(ccflags, list) else str(ccflags)
-        cxxflags_str = cflags_str  # Use same flags for CXX
+        # Construct CFLAGS directly with the correct --target flag for clang cross-compilation
+        # The --target flag is CRITICAL for clang to generate code for the correct architecture
+        # Format: --target=<arch>-linux-android<api_level>
+        target_flag = "--target={}{}".format(arch_info['target'], api_level)
+        march_flag = "-march={}".format(arch_info['march'])
         
-        # Add Android-specific defines and ensure -fPIC
-        cflags_str = "-fPIC -DANDROID " + cflags_str
-        cxxflags_str = "-fPIC -DANDROID " + cxxflags_str
+        cflags_str = "{} {} -fPIC -DANDROID".format(target_flag, march_flag)
+        cxxflags_str = cflags_str
+        
+        # Also get AR and RANLIB from the NDK for creating static libraries
+        ar = env.get('AR', None)
+        ranlib = env.get('RANLIB', None)
         
         configure_flags.extend([
             "--host={}".format(host),
@@ -165,6 +168,12 @@ def _build_libartnet_arch(env, build_path, arch):
             "CFLAGS={}".format(cflags_str),
             "CXXFLAGS={}".format(cxxflags_str),
         ])
+        
+        # Add AR and RANLIB if available from the NDK
+        if ar:
+            configure_flags.append("AR={}".format(ar))
+        if ranlib:
+            configure_flags.append("RANLIB={}".format(ranlib))
     
     # Run autotools build process
     original_dir = os.getcwd()
@@ -245,13 +254,25 @@ def _build_libartnet_arch(env, build_path, arch):
             if 'ENV' in env and 'PATH' in env['ENV']:
                 existing_path = make_env.get('PATH', '')
                 make_env['PATH'] = env['ENV']['PATH'] + os.pathsep + existing_path
+            # Set CC/CXX in environment for make to use
+            if cc:
+                make_env['CC'] = cc
+            if cxx:
+                make_env['CXX'] = cxx
         
         # Disable -Werror and specific warnings that cause issues with libartnet code
         # Append to existing CFLAGS if set by configure, otherwise set new ones
         cflags_extra = "-fPIC -Wno-error -Wno-memset-elt-size -Wno-stringop-truncation"
-        # Read Makefile to see what CFLAGS configure set, then override
-        # The safest approach is to pass CFLAGS directly to make
-        make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
+        
+        # For Android, we need to pass the full CFLAGS including the target flag
+        # because make might not preserve them correctly from configure
+        if platform == "android":
+            # Use the cflags_str we already constructed with --target
+            make_cflags = cflags_str + " " + cflags_extra
+            make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS=" + make_cflags]
+        else:
+            # For other platforms, just append to existing CFLAGS
+            make_cmd = ["make", "-j", str(os.cpu_count() or 4), "CFLAGS+=" + cflags_extra]
         
         result = subprocess.run(make_cmd, capture_output=True, text=True, env=make_env)
         if result.returncode != 0:
@@ -349,6 +370,7 @@ def _build_libartnet_windows(env, build_path, arch):
             "/p:PlatformToolset=" + platform_toolset,  # Override toolset to use available version
             "/v:minimal",  # Minimal verbosity
             "/nologo",  # Suppress MSBuild banner
+            "/nodeReuse:false",  # Don't keep MSBuild nodes alive - helps release file handles
         ]
         
         print("Running MSBuild command:", " ".join(msbuild_cmd))
@@ -450,129 +472,67 @@ def _build_libartnet_windows(env, build_path, arch):
     return True
 
 # Build libartnet before building the extension
+libartnet_built = None  # Will be set to a SCons target for non-Windows platforms
+
 if env['platform'] != "web":
     # Use platform-specific build directory
     libartnet_build_dir = os.path.join(libartnet_dir, ".build", env['platform'])
     
-    # Create marker file creation function
-    def create_marker(target, source, env):
-        marker_file = str(target[0])
-        marker_dir = os.path.dirname(marker_file)
-        
-        # On Windows, verify the build actually succeeded by checking for the library file
-        # If the library exists, we can skip marker creation if it fails
-        platform = env.get('platform', '')
-        if platform == "windows":
-            libartnet_build_dir = os.path.join(libartnet_dir, ".build", "windows")
-            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
-            build_succeeded = os.path.exists(lib_file)
-        else:
-            build_succeeded = True
-        
-        # Ensure directory exists
-        try:
-            os.makedirs(marker_dir, exist_ok=True)
-        except (IOError, OSError):
-            # Directory might be locked, wait and retry
-            import time
-            time.sleep(0.2)
-            try:
-                os.makedirs(marker_dir, exist_ok=True)
-            except (IOError, OSError):
-                if not build_succeeded:
-                    # Build didn't succeed, we need the marker to fail
-                    raise
-                # Build succeeded, directory creation failure is non-fatal
-                pass
-        
-        # Create marker file with retry logic for Windows file locking
-        import time
-        max_retries = 10
-        retry_delay = 0.2
-        marker_created = False
-        
-        for attempt in range(max_retries):
-            try:
-                # Try to create/truncate the file
-                # Use 'x' mode first to ensure it doesn't exist, fall back to 'w'
-                try:
-                    with open(marker_file, 'x') as f:
-                        f.write("libartnet built successfully\n")
-                except FileExistsError:
-                    # File exists, just update it
-                    with open(marker_file, 'w') as f:
-                        f.write("libartnet built successfully\n")
-                marker_created = True
-                break  # Success, exit retry loop
-            except (IOError, OSError, PermissionError) as e:
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 1.5, 2.0)  # Exponential backoff, max 2s
-                else:
-                    # All retries exhausted
-                    if build_succeeded:
-                        # Build succeeded but marker creation failed - this is non-fatal on Windows
-                        # The library file existing is proof the build succeeded
-                        print("Warning: Could not create marker file {}, but build succeeded (library file exists)".format(marker_file))
-                        marker_created = False
-                    else:
-                        # Build didn't succeed, marker creation failure indicates a problem
-                        raise
-        
-        # If marker creation failed but build succeeded, that's OK
-        # SCons will check the library file existence as a fallback
-        return 0
-    
-    # Build libartnet and create marker file
-    # Ensure godot-cpp is built first
-    godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
-    godot_cpp_lib_file = env.File(godot_cpp_lib_path)
-    
-    # For Windows, create a custom action that checks library file if marker creation fails
-    marker_target = os.path.join(libartnet_build_dir, ".built")
+    # For Windows, we build libartnet synchronously during SConstruct processing
+    # to avoid SCons marker file locking issues. SCons has known issues with
+    # target file management on Windows where file handles aren't released properly.
+    # See: https://github.com/actions/runner/issues/2687 and similar issues
     if env['platform'] == "windows":
-        def create_marker_or_verify(target, source, env):
-            """Create marker file, or verify library exists if marker creation fails"""
+        # Check if libartnet needs to be built
+        win_lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+        
+        # Build libartnet synchronously (not as a SCons target)
+        # This avoids Windows file locking issues with SCons marker files
+        print("Building libartnet for Windows...")
+        build_result = build_libartnet(None, None, env)
+        if build_result != 0:
+            print_error("Failed to build libartnet for Windows")
+            sys.exit(1)
+        
+        if not os.path.exists(win_lib_file):
+            print_error("libartnet build completed but library not found at:", win_lib_file)
+            sys.exit(1)
+        
+        print("libartnet built successfully for Windows")
+        
+        # No marker file needed - the library file itself is proof of build
+        libartnet_built = None
+    else:
+        # For non-Windows platforms, use normal SCons Command with marker file
+        # Create marker file creation function
+        def create_marker(target, source, env):
             marker_file = str(target[0])
-            lib_file = os.path.join(libartnet_build_dir, "lib", "libartnet.lib")
+            marker_dir = os.path.dirname(marker_file)
             
-            # Try to create marker file
-            try:
-                result = create_marker(target, source, env)
-            except:
-                result = 1
+            # Ensure directory exists
+            os.makedirs(marker_dir, exist_ok=True)
             
-            # If marker creation failed, check if library exists
-            if result != 0 or not os.path.exists(marker_file):
-                if os.path.exists(lib_file):
-                    # Library exists, build succeeded - create a dummy marker
-                    # Use a different approach: touch the file using os.utime
-                    try:
-                        # Create empty file by opening and closing
-                        open(marker_file, 'a').close()
-                        os.utime(marker_file, None)  # Update timestamp
-                    except:
-                        # Even that failed - but library exists, so build succeeded
-                        # Return 0 to indicate success
-                        pass
-                    return 0
-                else:
-                    # Library doesn't exist, build failed
-                    return 1
+            # Create marker file
+            with open(marker_file, 'w') as f:
+                f.write("libartnet built successfully\n")
+            
             return 0
         
-        libartnet_built = env.Command(
-            marker_target,
-            [godot_cpp_lib_file],  # Depend on godot-cpp being built first
-            [build_libartnet, create_marker_or_verify]
-        )
-    else:
+        # Build libartnet and create marker file
+        # Ensure godot-cpp is built first
+        godot_cpp_lib_path = "godot-cpp/bin/libgodot-cpp{}{}".format(env['suffix'], env['LIBSUFFIX'])
+        godot_cpp_lib_file = env.File(godot_cpp_lib_path)
+        
+        # Place marker file in .markers directory
+        markers_dir = ".markers"
+        marker_target = os.path.join(markers_dir, "libartnet.{}.built".format(env['platform']))
+        
         libartnet_built = env.Command(
             marker_target,
             [godot_cpp_lib_file],  # Depend on godot-cpp being built first
             [build_libartnet, create_marker]
         )
-    env.AlwaysBuild(libartnet_built)
+        env.AlwaysBuild(libartnet_built)
     
     # Add libartnet include and library paths
     # Headers are installed in include/artnet/ directory
@@ -613,7 +573,8 @@ suffix = env['suffix'].replace(".dev", "")
 lib_filename = "{}{}{}{}".format(env.subst('$SHLIBPREFIX'), libname, suffix, env.subst('$SHLIBSUFFIX'))
 
 # Make libartnet build a dependency before creating the library
-if env['platform'] != "web":
+# (Not needed for Windows since libartnet is built synchronously during SConstruct)
+if env['platform'] != "web" and libartnet_built is not None:
     # Ensure libartnet is built before we try to compile sources
     # Make each source file depend on libartnet_built
     for source in sources:
@@ -631,7 +592,8 @@ godot_cpp_lib_file = env.File(godot_cpp_lib_path)
 env.Depends(library, godot_cpp_lib_file)
 
 # Make libartnet build a dependency of the library
-if env['platform'] != "web":
+# (Not needed for Windows since libartnet is built synchronously during SConstruct)
+if env['platform'] != "web" and libartnet_built is not None:
     env.Depends(library, libartnet_built)
 
 copy = env.Install("{}/bin/{}/".format(projectdir, env["platform"]), library)
