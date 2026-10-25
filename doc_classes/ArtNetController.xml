@@ -9,6 +9,33 @@
 		ArtNet is a protocol that allows transmission of DMX-512 data over IP networks, commonly used in professional lighting control systems.
 		
 		[b]Note:[/b] ArtNet networking is not supported on WebAssembly/WASM platforms. Methods will return errors on WASM builds.
+
+		Two ways to use it:
+		- A classic node: [method configure] (one output port), [method start], then [method set_dmx_data] + [method send_dmx] to transmit, or [method read] + [method get_dmx_data] to receive that one universe.
+		- Frame streaming for pixel installations with hundreds of universes: [method configure_receive] + [method start] + [method read] + [method take_frame] on the receiving side, and [method send_frame] on the sending side (no node, no port binding). Frames are delimited by the ArtDmx sequence byte, which every universe of one frame shares.
+
+		libartnet binds UDP port 6454 on every interface with SO_REUSEPORT and needs a non-loopback network interface to exist. By default it also drops packets sent from this host; see [method set_accept_local_packets].
+
+		[codeblock]
+# Configure and start ArtNet controller
+var artnet = ArtNetController.new()
+if artnet.configure("192.168.1.100", 6454, 0, 0, 0):
+    if artnet.start():
+        print("ArtNet controller started")
+        
+        # Set DMX data (512 channels)
+        var dmx_data = PackedByteArray()
+        dmx_data.resize(512)
+        dmx_data[0] = 255  # Channel 1 at full brightness
+        dmx_data[1] = 128  # Channel 2 at half brightness
+        
+        if artnet.set_dmx_data(0, dmx_data):
+            if artnet.send_dmx():
+                print("DMX data sent")
+        
+        # Clean up
+        artnet.stop()
+		[/codeblock]
 	</description>
 	<tutorials>
 	</tutorials>
@@ -77,28 +104,85 @@
 				Returns [code]true[/code] on success, [code]false[/code] on error.
 			</description>
 		</method>
+		<method name="configure_receive">
+			<return type="bool" />
+			<param index="0" name="start_universe" type="int" />
+			<param index="1" name="universe_count" type="int" />
+			<param index="2" name="channels_per_universe" type="int" default="510" />
+			<param index="3" name="bind_address" type="String" default="&quot;&quot;" />
+			<description>
+				Creates a node that receives [param universe_count] consecutive universes starting at the 15-bit port address [param start_universe] (Net in the high byte, Sub-Net and Universe in the low byte), each contributing [param channels_per_universe] bytes to one contiguous frame. Call [method start] afterwards and [method read] every frame. An empty [param bind_address] picks the first network interface.
+
+				Every ArtDmx packet is routed by our own handler, so the 4-port limit of a classic node does not apply. A frame is published when a packet carries a new sequence byte, when a universe repeats, or when the last universe arrives; universes missing from a frame keep the previous frame's bytes. Unknown Art-Net opcodes are swallowed silently.
+			</description>
+		</method>
+		<method name="set_accept_local_packets">
+			<return type="void" />
+			<param index="0" name="accept" type="bool" />
+			<description>
+				libartnet drops packets whose source is this host's own IP address or 127.0.0.1, so two programs on one machine never hear each other. Pass [code]true[/code] to accept them (a renderer and a visualizer on the same computer). Default [code]false[/code].
+			</description>
+		</method>
+		<method name="get_accept_local_packets" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Whether packets from this host are accepted. See [method set_accept_local_packets].
+			</description>
+		</method>
+		<method name="set_receive_buffer_size">
+			<return type="bool" />
+			<param index="0" name="bytes" type="int" />
+			<description>
+				Asks the kernel for a larger UDP receive buffer (SO_RCVBUF) so a burst of several hundred universes survives a slow frame. Halves the request until the kernel accepts it. Applied immediately when running, otherwise on [method start].
+			</description>
+		</method>
+		<method name="has_frame" qualifiers="const">
+			<return type="bool" />
+			<description>
+				[code]true[/code] when a complete (or flushed) frame is waiting for [method take_frame].
+			</description>
+		</method>
+		<method name="take_frame">
+			<return type="PackedByteArray" />
+			<description>
+				The latest published frame as one contiguous stream of [code]universe_count * channels_per_universe[/code] bytes (universe 0 first), or an empty array when none is waiting. Clears [method has_frame].
+			</description>
+		</method>
+		<method name="get_frame_sequence" qualifiers="const">
+			<return type="int" />
+			<description>
+				The ArtDmx sequence byte of the last published frame.
+			</description>
+		</method>
+		<method name="flush_frame">
+			<return type="bool" />
+			<description>
+				Publishes the universes received so far as a frame, for a trailing partial frame that no later packet will complete. Returns [code]false[/code] when nothing is pending.
+			</description>
+		</method>
+		<method name="get_receive_stats" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Counters: [code]packets[/code], [code]frames[/code], [code]partial_frames[/code], [code]ignored[/code] (universes outside the configured range), [code]pending[/code] (universes of the frame being assembled), [code]last_sequence[/code], [code]universe_count[/code], [code]channels_per_universe[/code].
+			</description>
+		</method>
+		<method name="send_frame">
+			<return type="int" />
+			<param index="0" name="start_universe" type="int" />
+			<param index="1" name="data" type="PackedByteArray" />
+			<param index="2" name="channels_per_universe" type="int" default="510" />
+			<param index="3" name="dest_address" type="String" default="&quot;127.0.0.1&quot;" />
+			<param index="4" name="dest_port" type="int" default="6454" />
+			<description>
+				Sends [param data] as consecutive ArtDmx universes of [param channels_per_universe] bytes, starting at the 15-bit port address [param start_universe], unicast (or broadcast for a x.x.x.255 address) to [param dest_address]:[param dest_port]. The last universe may be short; odd lengths are padded with one zero byte. All universes of one call share a sequence byte (1..255, advancing per call). Uses a plain UDP socket of its own, so it needs no [method configure] or [method start] and never binds the Art-Net port. Returns the number of universes sent, or -1 on a bad argument.
+			</description>
+		</method>
+		<method name="get_send_stats" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Counters for [method send_frame]: [code]frames[/code], [code]packets[/code], [code]errors[/code], [code]last_sequence[/code].
+			</description>
+		</method>
 	</methods>
-	<example>
-			<code>
-# Configure and start ArtNet controller
-var artnet = ArtNetController.new()
-if artnet.configure("192.168.1.100", 6454, 0, 0, 0):
-    if artnet.start():
-        print("ArtNet controller started")
-        
-        # Set DMX data (512 channels)
-        var dmx_data = PackedByteArray()
-        dmx_data.resize(512)
-        dmx_data[0] = 255  # Channel 1 at full brightness
-        dmx_data[1] = 128  # Channel 2 at half brightness
-        
-        if artnet.set_dmx_data(0, dmx_data):
-            if artnet.send_dmx():
-                print("DMX data sent")
-        
-        # Clean up
-        artnet.stop()
-			</code>
-	</example>
 </class>
 
