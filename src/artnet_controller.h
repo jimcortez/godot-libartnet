@@ -37,5 +37,10 @@ public:
 	bool is_running() const;
 	bool set_dmx_data(int universe, const PackedByteArray &data);
 	bool send_dmx();
+	
+	// Receive methods
+	bool read(int timeout_ms = 0);
+	PackedByteArray get_dmx_data(int port_id = 0);
+	int get_universe_addr(int port_id = 0);
 };
 
