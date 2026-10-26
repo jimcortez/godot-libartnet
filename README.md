@@ -69,6 +69,48 @@ The built library will be in `bin/<platform>/` and copied to `demo/bin/<platform
 2. Copy the appropriate library file from `demo/bin/<platform>/` to your project
 3. Load the extension in your GDScript code
 
+## Frame streaming (many universes)
+
+A pixel installation needs hundreds of universes per frame, far beyond the
+four ports of a classic Art-Net node. `ArtNetController` therefore also
+offers a frame API that treats a run of universes as one contiguous byte
+stream:
+
+```gdscript
+# Receiver (binds UDP 6454; needs a network interface)
+var rx := ArtNetController.new()
+rx.configure_receive(0, 572, 510)      # universes 0..571, 510 channels each
+rx.set_accept_local_packets(true)      # the sender runs on this machine
+rx.set_receive_buffer_size(4 << 20)
+rx.start()
+
+func _process(_delta):
+    rx.read(0)                         # drains every pending packet
+    if rx.has_frame():
+        var stream: PackedByteArray = rx.take_frame()   # 572 * 510 bytes
+
+# Sender (no node, no port binding)
+var tx := ArtNetController.new()
+tx.send_frame(0, rgb_bytes, 510, "127.0.0.1", 6454)
+```
+
+Frames are delimited by the ArtDmx sequence byte, which every universe of
+one `send_frame()` call shares: the receiver publishes a frame when a new
+sequence starts, when a universe repeats, or when the last universe
+arrives, and `flush_frame()` publishes a trailing partial frame. Missing
+universes keep the previous frame's bytes. ArtSync is not used.
+
+Notes:
+
+- libartnet drops packets from this host's own IP and from 127.0.0.1;
+  `set_accept_local_packets(true)` turns that filter off (it needs the
+  `artnet_set_loopback_filter()` addition in the bundled libartnet fork).
+- libartnet binds port 6454 on all interfaces with `SO_REUSEPORT`. Run one
+  receiver per machine; a second one would silently take the packets.
+- `send_frame()` uses its own UDP socket on an ephemeral port, so a sender
+  never competes with a receiver on the same machine.
+- Tests: `./demo/tests/run_tests.sh` (headless, needs a network interface).
+
 ## Usage
 
 ### Basic Example

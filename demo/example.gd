@@ -1,76 +1,63 @@
 extends Node
 
-# ArtNet controller instance
+# Example ArtNet usage
+const UNIVERSE = 1  # ArtNet universe to send data on
+const SEND_INTERVAL = 0.5  # Send interval in seconds
+
+# Network configuration
+# See README.md for instructions on how to find these values for your system
+const BIND_ADDRESS = "192.168.2.52"  # Your computer's IP address on the network
+const BROADCAST_ADDRESS = "192.168.15.255"  # Your network's broadcast address
+
 var artnet: ArtNetController
+var time_since_last_send: float = 0.0
 
 func _ready() -> void:
-	# Create ArtNet controller
 	artnet = ArtNetController.new()
 	
-	print("ArtNet GDExtension Demo")
-	print("=======================")
-	
-	# Configure the ArtNet controller
+	# Configure ArtNet controller
 	# Parameters: bind_address, port, net, subnet, universe, broadcast_address
-	# Using default broadcast address (255.255.255.255)
-	var bind_address = "127.0.0.1"  # Change this to your network interface IP
-	var port = 6454  # Standard ArtNet port
-	var net = 0      # ArtNet net (0-127)
-	var subnet = 0   # ArtNet subnet (0-15)
-	var universe = 0 # DMX universe (0-15)
+	if not artnet.configure(BIND_ADDRESS, 6454, 0, 0, UNIVERSE, BROADCAST_ADDRESS):
+		print("Failed to configure ArtNet controller")
+		return
 	
-	print("Configuring ArtNet controller...")
-	if artnet.configure(bind_address, port, net, subnet, universe):
-		print("✓ ArtNet configured successfully")
-		
-		# Start the controller
-		print("Starting ArtNet controller...")
-		if artnet.start():
-			print("✓ ArtNet started successfully")
-			
-			# Create some DMX data (512 channels)
-			var dmx_data = PackedByteArray()
-			dmx_data.resize(512)
-			
-			# Set some example channel values
-			# Channel 1: Full brightness (255)
-			dmx_data[0] = 255
-			# Channel 2: Half brightness (128)
-			dmx_data[1] = 128
-			# Channel 3: Quarter brightness (64)
-			dmx_data[2] = 64
-			# Channel 4: Off (0)
-			dmx_data[3] = 0
-			
-			# Set a pattern: every 10th channel at full brightness
-			for i in range(0, 512, 10):
-				dmx_data[i] = 255
-			
-			print("Setting DMX data...")
-			if artnet.set_dmx_data(universe, dmx_data):
-				print("✓ DMX data set successfully")
-				
-				# Send the DMX data
-				print("Sending DMX data...")
-				if artnet.send_dmx():
-					print("✓ DMX data sent successfully!")
-					print("Check your ArtNet receiver to see the DMX data.")
-				else:
-					print("✗ Failed to send DMX data")
-			else:
-				print("✗ Failed to set DMX data")
-			
-			# Clean up
-			print("Stopping ArtNet controller...")
-			artnet.stop()
-			print("✓ ArtNet stopped")
+	# Start the controller (DMX sending is automatically enabled)
+	if not artnet.start():
+		print("Failed to start ArtNet controller")
+		return
+	
+	print("ArtNet controller started successfully")
+	print("Sending random DMX data on universe ", UNIVERSE, " every ", SEND_INTERVAL, " seconds")
+	
+func _process(delta: float) -> void:
+	if not artnet:
+		return
+	
+	time_since_last_send += delta
+	
+	if time_since_last_send >= SEND_INTERVAL:
+		time_since_last_send = 0.0
+		_send_dmx_data()
+
+func _send_dmx_data() -> void:
+	# Generate random DMX values for all 512 channels
+	# Create DMX data (512 channels - full universe)
+	var dmx_data: PackedByteArray
+	dmx_data.resize(512)
+	for i in range(dmx_data.size()):
+		dmx_data[i] = randi() % 256
+	
+	# Set DMX data for the configured universe
+	if artnet.set_dmx_data(UNIVERSE, dmx_data):
+		# Send the DMX data
+		if artnet.send_dmx():
+			print("DMX data sent successfully (universe ", UNIVERSE, ")")
 		else:
-			print("✗ Failed to start ArtNet")
+			print("Failed to send DMX data")
 	else:
-		print("✗ Failed to configure ArtNet")
-		print("Note: Make sure you have network permissions and the IP address is correct.")
+		print("Failed to set DMX data")
 
 func _exit_tree() -> void:
-	# Ensure cleanup when the node is removed
-	if artnet and artnet.is_running():
+	if artnet:
 		artnet.stop()
+		artnet = null
